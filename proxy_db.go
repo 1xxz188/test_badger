@@ -75,7 +75,7 @@ func CreateDBProxy(db *badger.DB, c *controlEXE.ControlEXE) (*DBProxy, error) {
 			now := time.Now()
 			startTm := now
 			toSave := proxy.noSaveMap.Items()
-			fmt.Printf(">save key size[%d] snapshot[%d ms]\n", len(toSave), time.Since(now).Milliseconds())
+			snapshotMs := time.Since(now).Milliseconds()
 			now = time.Now()
 			for key, _ := range toSave {
 				proxy.noSaveMap.Remove(key)
@@ -90,13 +90,13 @@ func CreateDBProxy(db *badger.DB, c *controlEXE.ControlEXE) (*DBProxy, error) {
 					panic(err)
 				}
 			}
-			fmt.Printf(">save key size[%d] range Set[%d ms]\n", len(toSave), time.Since(now).Milliseconds())
+			rangeMs := time.Since(now).Milliseconds()
 			now = time.Now()
 			if err = wb.Flush(); err != nil {
 				panic(err)
 			}
 			wb.Cancel()
-			fmt.Printf(">save key size[%d] Flush[%d ms] total[%d ms]\n", len(toSave), time.Since(now).Milliseconds(), time.Since(startTm).Milliseconds())
+			fmt.Printf(">save key size[%d] snapshot[%d ms] range[%d ms] Flush[%d ms] total[%d ms]\n", len(toSave), snapshotMs, rangeMs, time.Since(now).Milliseconds(), time.Since(startTm).Milliseconds())
 		}
 		for {
 			select {
@@ -107,6 +107,7 @@ func CreateDBProxy(db *badger.DB, c *controlEXE.ControlEXE) (*DBProxy, error) {
 				c.WGWait() //wait all send data coroutine exit
 				fmt.Println("wait all data save")
 				saveData()
+				fmt.Println("all data save ok")
 				return
 			}
 		}

@@ -2,12 +2,14 @@ package main
 
 import (
 	"container/list"
+	"errors"
 	"fmt"
 	badger "github.com/dgraph-io/badger/v3"
 	cmap "github.com/orcaman/concurrent-map"
 	"gopkg.in/alecthomas/kingpin.v2"
 	"log"
 	"math/rand"
+	"sync"
 	"test_badger/controlEXE"
 
 	//"net/http"
@@ -392,7 +394,7 @@ func main() {
 	kOnlineNum := kingpin.Flag("onlineNum", "[get-set] online num").Default("10000").Int()
 	kStep := kingpin.Flag("step", "[get-set] step").Default("1000").Int()
 	kStayTm := kingpin.Flag("stayTm", "[get-set] stay time[ns, us, ms, s, m, h]").Default("1m30s").String()
-	kTotalLimit := kingpin.Flag("totalLimit", "[get-set] total limit time sec").Default("20000").Int()
+	kLimitStepCnt := kingpin.Flag("limitStepCnt", "[get-set] total limit step cnt").Default("5").Int()
 	kCurBeginId := kingpin.Flag("beginId", "[get-set] begin id").Default("10000").Int()
 	kSendLimit := kingpin.Flag("sendLimit", "[get-set] send count for per ms").Default("1").Int()
 
@@ -423,7 +425,10 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer db.Close()
+	defer func() {
+		log.Println("main() exit!!!")
+		db.Close()
+	}()
 
 	log.Printf("openTm[%d ms] dataLen[%d], lsmMaxValue[%d]\n", time.Since(openTm).Milliseconds(), dataLen, *lsmMaxValue)
 
@@ -516,10 +521,11 @@ func main() {
 			panic(err)
 		}
 		//stayTm := time.Minute //* 5 //步长持续时间
-		totalLimit := *kTotalLimit //2000000 //总限制
-		if totalLimit <= 0 {
-			panic("totalLimit <= 0")
+		limitStepCnt := *kLimitStepCnt //2000000 //总限制
+		if limitStepCnt <= 0 {
+			panic("limitStepCnt <= 0")
 		}
+		curStepCnt := 1
 		curBeginId := *kCurBeginId
 		if curBeginId < 0 {
 			panic("curBeginId < 0")
@@ -531,7 +537,7 @@ func main() {
 		}
 		r.times.Init()*/
 		r := rateLimiter.NewBucket(time.Millisecond, 500)
-		log.Printf("totalLimit[%d] onlineNum[%d], curBeginId[%d] step[%d] stayTm[%s], rate[%d qps]", totalLimit, onlineNum, curBeginId, step, stayTm.String(), int(time.Second/time.Millisecond)*(*kSendLimit))
+		log.Printf("limitStepCnt[%d] onlineNum[%d], curBeginId[%d] step[%d] stayTm[%s], rate[%d qps]", limitStepCnt, onlineNum, curBeginId, step, stayTm.String(), int(time.Second/time.Millisecond)*(*kSendLimit))
 
 		beginTm := time.Now()
 		r.Wait(1)
@@ -544,34 +550,27 @@ func main() {
 					proxyDB.c.CTXCancel()
 					return
 				}
-				if id >= totalLimit {
-					break
-				}
-
-				//放入执行队列
-				chId <- id
+				chId <- id //放入执行队列
 				cntShould--
 				if cntShould <= 0 {
 					r.Wait(1)
 					cntShould = limit
 				}
 			}
-
-			//是否全部执行完毕
-			if curBeginId >= totalLimit {
-				log.Println("全部执行完毕!")
-				proxyDB.c.CTXCancel()
-				return
-			}
-
 			//是否达到一轮时间
 			if time.Since(beginTm) < stayTm {
 				continue
 			}
-
+			//是否全部执行完毕
+			if curStepCnt >= limitStepCnt {
+				log.Printf("全部执行完毕! curStepCnt[%d] >= limitStepCnt[%d]\n", curStepCnt, limitStepCnt)
+				proxyDB.c.CTXCancel()
+				return
+			}
+			curStepCnt++
 			curBeginId += step
 			beginTm = time.Now()
-			log.Printf("新一轮开始 curBeginId[%d]\n", curBeginId)
+			log.Printf("新一轮开始 curBeginId[%d] Step[%d/%d]\n", curBeginId, curStepCnt, limitStepCnt)
 		}
 	}
 	switch *op {
@@ -603,10 +602,18 @@ func main() {
 	var gcMaxMs int64
 	var gcMaxMB int64
 	var gcRunOKCnt int64
+	proxyDB.c.WG3Add(1)
 	go func() {
+		defer proxyDB.c.WG3Done()
+
 		gcRate := *kGcRate
 		log.Printf("Start GC Rate[%0.6f]\n", gcRate)
-		for !db.IsClosed() {
+		gcTicker := time.NewTicker(time.Second * 10)
+
+		runGC := func() (int64, error) {
+			if db.IsClosed() {
+				return 0, errors.New("find db.IsClosed() When GC")
+			}
 			beforeTm := time.Now()
 			beforeSize, err := GetDirSize(dir)
 			if err != nil {
@@ -615,12 +622,13 @@ func main() {
 
 			for {
 				if db.IsClosed() {
-					return
+					return 0, errors.New("find db.IsClosed() When GC")
 				}
 				if err := db.RunValueLogGC(gcRate); err != nil {
 					if err == badger.ErrNoRewrite || err == badger.ErrRejected {
 						break
 					}
+
 					log.Println("Err GC: ", err)
 				} else {
 					gcRunOKCnt++
@@ -628,7 +636,7 @@ func main() {
 			}
 			afterSize, err := GetDirSize(dir)
 			if err != nil {
-				panic(err)
+				return 0, err
 			}
 			diffGcMB := beforeSize - afterSize
 			diffGcTm := time.Since(beforeTm)
@@ -638,8 +646,56 @@ func main() {
 			if gcMaxMB < diffGcMB {
 				gcMaxMB = diffGcMB
 			}
-			log.Printf("GC>[cost %s] size[%d MB]->[%d MB] diff[%d MB]\n", diffGcTm.String(), beforeSize, afterSize, diffGcMB)
-			time.Sleep(time.Second * 10)
+			if diffGcMB != 0 {
+				log.Printf("GC>[cost %s] size[%d MB]->[%d MB] diff[%d MB]\n", diffGcTm.String(), beforeSize, afterSize, diffGcMB)
+			}
+			return diffGcMB, nil
+		}
+
+		for {
+			select {
+			case <-proxyDB.c.CTXDone():
+				//立即触发一次GC
+				_, err := runGC()
+				if err != nil {
+					log.Println(err)
+				}
+
+				wgGCExit := sync.WaitGroup{}
+				wgGCExit.Add(1)
+				exitGCChan := make(chan struct{})
+				go func() {
+					defer wgGCExit.Done()
+					exitGCTicker := time.NewTicker(time.Second)
+
+					for {
+						select {
+						case <-exitGCTicker.C:
+							_, err := runGC()
+							if err != nil {
+								log.Println(err)
+								return
+							}
+						case <-exitGCChan:
+							gcSize, err := runGC() //最后一次GC
+							if err != nil {
+								log.Println(err)
+							}
+							log.Println("Last gcSize: ", gcSize)
+							return
+						}
+					}
+				}()
+				proxyDB.c.WG2Wait() //wait all data save
+				close(exitGCChan)
+				wgGCExit.Wait() //等待完全GC
+				return
+			case <-gcTicker.C:
+				_, err := runGC()
+				if err != nil {
+					log.Println(err)
+				}
+			}
 		}
 	}()
 	sg := make(chan os.Signal)
@@ -650,8 +706,13 @@ func main() {
 		log.Printf("EXE Tm[%s] totalSendCnt: %d, QPS: %0.3f --> %0.3f, gcMax[%d ms] gcMax[%d MB] gcRunOKCnt[%d]\n", diffExeTm.String(), totalSendCnt, float64(totalSendCnt)/diffExeTm.Seconds(), float64(totalSendCnt)/diffExeTm.Seconds()/2, gcMaxMs, gcMaxMB, gcRunOKCnt)
 
 		proxyDB.c.WG2Wait()
-		diffSaveTm := time.Since(openTm)
-		log.Printf("All EXE Tm[%s]", diffSaveTm.String())
+		diffWG2Tm := time.Since(openTm)
+		log.Printf("WG2Wait All EXE Tm[%s]", diffWG2Tm.String())
+
+		proxyDB.c.WG3Wait()
+		diffWG3Tm := time.Since(openTm)
+		log.Printf("WG3Wait All EXE Tm[%s]", diffWG3Tm.String())
+
 		sg <- syscall.SIGINT
 	}()
 
@@ -661,7 +722,7 @@ func main() {
 		fmt.Println("the app will shutdown.")
 		proxyDB.c.CTXCancel()
 		isClose = true
-		proxyDB.c.WG2Wait()
+		proxyDB.c.WG3Wait()
 	}
 	//Print(db)
 	// Your code here…

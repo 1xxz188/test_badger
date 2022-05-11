@@ -1,3 +1,4 @@
 /data/
 /.idea/
 *.exe
+/test_badger_bigcache_arm64
