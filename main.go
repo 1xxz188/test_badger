@@ -749,6 +749,22 @@ func main() {
 		isClose = true
 		proxyDB.c.WG3Wait()
 	}
-	//Print(db)
-	// Your code here…
+
+	now := time.Now()
+	fmt.Printf("DBCount: %d, cost: %s\n", GetDBCount(db), time.Since(now).String())
+
+	now = time.Now()
+	fmt.Printf("[%d] Role_ cost: %s\n", GetPreDBCount(db, "Role_"), time.Since(now).String())
+
+	now = time.Now()
+	fmt.Printf("[%d] Item_ cost: %s\n", GetPreDBCount(db, "Item_"), time.Since(now).String())
+
+	now = time.Now()
+	fmt.Printf("[%d] Build_ cost: %s\n", GetPreDBCount(db, "Build_"), time.Since(now).String())
+
+	now = time.Now()
+	fmt.Printf("[%d] Home_ cost: %s\n", GetPreDBCount(db, "Home_"), time.Since(now).String())
+
+	now = time.Now()
+	fmt.Printf("[%d] Map_ cost: %s\n", GetPreDBCount(db, "Map_"), time.Since(now).String())
 }
