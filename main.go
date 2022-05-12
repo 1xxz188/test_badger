@@ -311,16 +311,32 @@ func Print(db *badger.DB) {
 	}
 	log.Printf("all keys: %d\n", count)
 }
-func PrintDBCount(db *badger.DB) {
+func GetDBCount(db *badger.DB) uint64 {
 	txn := db.NewTransaction(false)
 	defer txn.Discard()
-	itr := txn.NewIterator(badger.DefaultIteratorOptions)
+	opt := badger.DefaultIteratorOptions
+	opt.PrefetchValues = false
+	itr := txn.NewIterator(opt)
 	defer itr.Close()
-	count := 0
+	count := uint64(0)
 	for itr.Rewind(); itr.Valid(); itr.Next() {
 		count++
 	}
-	log.Printf("all keys: %d\n", count)
+	return count
+}
+func GetPreDBCount(db *badger.DB, prefix string) uint64 {
+	txn := db.NewTransaction(false)
+	defer txn.Discard()
+	opt := badger.DefaultIteratorOptions
+	opt.PrefetchValues = false
+	opt.Prefix = []byte(prefix)
+	itr := txn.NewIterator(opt)
+	defer itr.Close()
+	count := uint64(0)
+	for itr.Rewind(); itr.Valid(); itr.Next() {
+		count++
+	}
+	return count
 }
 func PrintV(db *badger.DB) {
 	txn := db.NewTransaction(false)
@@ -430,7 +446,11 @@ func main() {
 		db.Close()
 	}()
 
-	log.Printf("openTm[%d ms] dataLen[%d], lsmMaxValue[%d]\n", time.Since(openTm).Milliseconds(), dataLen, *lsmMaxValue)
+	originalDirSize, err := GetDirSize(dir)
+	if err != nil {
+		panic(err)
+	}
+	log.Printf("openTm[%d ms] dataLen[%d], lsmMaxValue[%d] originalDirSize[%d MB]\n", time.Since(openTm).Milliseconds(), dataLen, *lsmMaxValue, originalDirSize)
 
 	proxyDB, err := CreateDBProxy(db, controlEXE.CreateControlEXE())
 
@@ -655,8 +675,13 @@ func main() {
 		for {
 			select {
 			case <-proxyDB.c.CTXDone():
+				afterSize, err := GetDirSize(dir)
+				if err != nil {
+					panic(err)
+				}
+				fmt.Printf("Close Before DirSize[%d MB] originalDirSize[%d MB] diffMB[%d MB]\n", afterSize, originalDirSize, afterSize-originalDirSize)
 				//立即触发一次GC
-				_, err := runGC()
+				_, err = runGC()
 				if err != nil {
 					log.Println(err)
 				}

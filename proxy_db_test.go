@@ -6,7 +6,6 @@ import (
 	"github.com/dgraph-io/badger/v3"
 	"github.com/stretchr/testify/require"
 	"log"
-	"math/rand"
 	"sync"
 	"sync/atomic"
 	"test_badger/controlEXE"
@@ -61,7 +60,7 @@ func TestSave(t *testing.T) {
 	proxy, err := CreateDBProxy(db, c)
 	require.NoError(t, err)
 
-	data := func(l int) []byte {
+	/*data := func(l int) []byte {
 		m := make([]byte, l)
 		_, err := rand.Read(m)
 		if err != nil {
@@ -74,7 +73,7 @@ func TestSave(t *testing.T) {
 		key := fmt.Sprintf("key_%d", i)
 		err = proxy.Set(key, data(800))
 		require.NoError(t, err)
-	}
+	}*/
 
 	txn := db.NewTransaction(false)
 	_, err = proxy.Get(txn, "key_1")
@@ -92,9 +91,9 @@ func TestSave(t *testing.T) {
 		}
 	}()
 
-	intervalV := 200000
+	intervalV := 10000
 
-	for idx := 0; idx < 10; idx++ {
+	for idx := 0; idx < 4; idx++ {
 		c.WGAdd(1)
 		go func(c *controlEXE.ControlEXE, idx int) {
 			defer c.WGDone()
@@ -105,7 +104,7 @@ func TestSave(t *testing.T) {
 				select {
 				case _ = <-ticker.C:
 					count++
-					now := time.Now()
+					//now := time.Now()
 					for i := idx * intervalV; i < idx*intervalV+intervalV; i++ {
 						key := fmt.Sprintf("key_%d", i)
 						value := fmt.Sprintf("value_%d_%d", i, count)
@@ -114,8 +113,9 @@ func TestSave(t *testing.T) {
 						require.NoError(t, err)
 						atomic.AddUint32(&setCnt, 1)
 					}
-					fmt.Printf("Set cost[%d ms]\n", time.Since(now).Milliseconds())
-					if count > 120 {
+					//fmt.Printf("Set cost[%d ms]\n", time.Since(now).Milliseconds())
+					//time.Sleep(time.Second)
+					if count > 1200 {
 						c.CTXCancel()
 						return
 					}
@@ -156,15 +156,6 @@ func TestCheckDB(t *testing.T) {
 	fmt.Printf(">[%d ms]\n", time.Since(now).Milliseconds())
 }
 
-func TestDBCount(t *testing.T) {
-	db, err := badger.Open(CreateDefaultOptions())
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer db.Close()
-
-	PrintDBCount(db)
-}
 func TestContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg = new(sync.WaitGroup)

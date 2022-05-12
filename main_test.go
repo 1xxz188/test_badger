@@ -260,3 +260,20 @@ func TestBackup(t *testing.T) {
 	require.NoError(t, db.Load(bakNew, 16))
 	PrintV(db)
 }
+
+func TestDBCount(t *testing.T) {
+	db, err := badger.Open(badger.DefaultOptions("./data"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+
+	now := time.Now()
+	fmt.Printf("DBCount: %d, cost: %s\n", GetDBCount(db), time.Since(now).String())
+
+	now = time.Now()
+	fmt.Printf("[%d] Item_ cost: %s\n", GetPreDBCount(db, "Item_"), time.Since(now).String())
+
+	now = time.Now()
+	fmt.Printf("[%d] Role_ cost: %s\n", GetPreDBCount(db, "Role_"), time.Since(now).String())
+}
