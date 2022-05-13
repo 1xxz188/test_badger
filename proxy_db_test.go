@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/dgraph-io/badger/v3"
+	"github.com/golang/groupcache/singleflight"
 	"github.com/stretchr/testify/require"
 	"log"
 	"sync"
@@ -186,4 +187,37 @@ func TestContext(t *testing.T) {
 	cancel()
 	wg.Wait()
 	fmt.Println("Main Exit...")
+}
+
+func TestGoDo(t *testing.T) {
+	var g singleflight.Group
+	c := make(chan string)
+	var calls int32
+	fn := func() (interface{}, error) {
+		atomic.AddInt32(&calls, 1)
+		return <-c, nil
+	}
+
+	const n = 10
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(id int) { // n个协程同时调用了g.Do，fn中的逻辑只会被一个协程执行
+			v, err := g.Do("key", fn)
+			if err != nil {
+				t.Errorf("Do error: %v", err)
+			}
+			if v.(string) != "bar" {
+				t.Errorf("got %q; want %q", v, "bar")
+			}
+			fmt.Printf("id[%d] %#v\n", id, v)
+			wg.Done()
+		}(i)
+	}
+	time.Sleep(100 * time.Millisecond) // let goroutines above block
+	c <- "bar"
+	wg.Wait()
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Errorf("number of calls = %d; want 1", got)
+	}
 }

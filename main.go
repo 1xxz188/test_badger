@@ -9,11 +9,11 @@ import (
 	"gopkg.in/alecthomas/kingpin.v2"
 	"log"
 	"math/rand"
+	"net/http"
 	"sync"
 	"test_badger/controlEXE"
 
-	//"net/http"
-	//_ "net/http/pprof"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -395,6 +395,9 @@ func (r *RateLimiter) RateWait() {
 }
 
 func main() {
+	go func() {
+		fmt.Println(http.ListenAndServe("0.0.0.0:58000", nil))
+	}()
 	cmap.SHARD_COUNT = 1024
 	//./go_badger --op="get-set" -c 12 --stayTm="1m" --totalLimit=20000 --beginId=10000 --sendLimit=1 --dataSize=128
 	op := kingpin.Flag("op", "[insert] [get] [set] [get-set]").Default("get-set").String()
@@ -453,7 +456,9 @@ func main() {
 	log.Printf("openTm[%d ms] dataLen[%d], lsmMaxValue[%d] originalDirSize[%d MB]\n", time.Since(openTm).Milliseconds(), dataLen, *lsmMaxValue, originalDirSize)
 
 	proxyDB, err := CreateDBProxy(db, controlEXE.CreateControlEXE())
-
+	if err != nil {
+		panic(err)
+	}
 	chId := make(chan int, 1024*20)
 
 	goSendCnt := *coroutines
@@ -723,7 +728,7 @@ func main() {
 			}
 		}
 	}()
-	sg := make(chan os.Signal)
+	sg := make(chan os.Signal, 1)
 	go func() {
 		<-proxyDB.c.CTXDone()
 		proxyDB.c.WGWait()
@@ -767,4 +772,6 @@ func main() {
 
 	now = time.Now()
 	fmt.Printf("[%d] Map_ cost: %s\n", GetPreDBCount(db, "Map_"), time.Since(now).String())
+
+	fmt.Printf("GetCachePenetrateCnt: %d, GetLoadDBCnt: %d \n", proxyDB.GetCachePenetrateCnt(), proxyDB.GetLoadDBCnt())
 }

@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"github.com/dgraph-io/badger/v3"
+	"github.com/golang/groupcache/singleflight"
 	cmap "github.com/orcaman/concurrent-map"
+	"sync/atomic"
 	"test_badger/cachedb"
 	"test_badger/controlEXE"
 	"time"
@@ -15,6 +17,10 @@ type DBProxy struct {
 	cache     cachedb.Cache
 	c         *controlEXE.ControlEXE
 	noSaveMap cmap.ConcurrentMap
+	g         singleflight.Group
+
+	cachePenetrateCnt uint32 //穿透缓存次数
+	loadDBCnt         uint32 //加载DB次数 TODO 分开64字节
 }
 
 func CreateDBProxy(db *badger.DB, c *controlEXE.ControlEXE) (*DBProxy, error) {
@@ -115,30 +121,61 @@ func CreateDBProxy(db *badger.DB, c *controlEXE.ControlEXE) (*DBProxy, error) {
 
 	return proxy, nil
 }
+func (proxy *DBProxy) GetCachePenetrateCnt() uint32 {
+	return atomic.LoadUint32(&proxy.cachePenetrateCnt)
+}
+func (proxy *DBProxy) GetLoadDBCnt() uint32 {
+	return atomic.LoadUint32(&proxy.loadDBCnt)
+}
 
 func (proxy *DBProxy) Get(txn *badger.Txn, key string) ([]byte, error) {
 	data, err := proxy.cache.Get(key)
 	if err != nil {
-		if err == cachedb.ErrEntryNotFound {
+		if err != cachedb.ErrEntryNotFound {
+			return nil, err
+		}
+
+		atomic.AddUint32(&proxy.cachePenetrateCnt, 1)
+
+		//穿透到badger
+		/*item, err := txn.Get([]byte(key))
+		if err != nil {
+			return nil, err
+		}
+		data, err := item.ValueCopy(nil)
+		if err != nil {
+			return nil, err
+		}
+		//更新到缓存中
+		err = proxy.cache.Set(key, data)
+		if err != nil {
+			return nil, err
+		}
+		return data, nil*/
+		//TODO 查一下 badger里面是否保证了缓存击穿
+		data, err := proxy.g.Do(key, func() (interface{}, error) { //TODO 改为模板封装
+			atomic.AddUint32(&proxy.loadDBCnt, 1)
 			//穿透到badger
 			item, err := txn.Get([]byte(key))
 			if err != nil {
 				return nil, err
 			}
-			data, err = item.ValueCopy(nil)
+			v, err := item.ValueCopy(nil)
 			if err != nil {
 				return nil, err
 			}
-
-			//更新到缓存中
-			err = proxy.cache.Set(key, data)
-			if err != nil {
-				return nil, err
-			}
-			return data, nil
+			return v, nil
+		})
+		if err != nil {
+			return nil, err
 		}
 
-		return nil, err
+		//更新到缓存中
+		err = proxy.cache.Set(key, data.([]byte))
+		if err != nil {
+			return nil, err
+		}
+		return data.([]byte), nil
 	}
 	return data, nil
 }

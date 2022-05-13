@@ -27,7 +27,7 @@ func NewBigCache(fnRemove func(key string, entry []byte, reason RemoveReason)) (
 	}
 
 	config := bigcache.DefaultConfig(10 * time.Minute)
-	config.Shards = 1024
+	config.Shards = 1024               //2`14
 	config.HardMaxCacheSize = 1024 * 2 //2G
 	config.MaxEntrySize = 1024
 	config.MaxEntriesInWindow = 400000 * 6
