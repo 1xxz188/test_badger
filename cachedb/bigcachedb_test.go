@@ -39,11 +39,11 @@ func TestDemo(t *testing.T) {
 	iterator := cache.Iterator()
 
 	for iterator.SetNext() {
-		_, err = iterator.Value()
+		_, err := iterator.Value()
 		if err != nil {
 			break
 		}
-		//fmt.Println(current.Key(), string(current.Value()))
+		//fmt.Println(e.Key(), len(e.Value()))
 	}
 	//fmt.Println(string(entry))
 }
@@ -86,4 +86,30 @@ func TestRemoveExpired(t *testing.T) {
 		err := cache.Set(key, data(800))
 		require.NoError(t, err)
 	}
+}
+
+func TestDBInsert(t *testing.T) {
+	t.Parallel()
+	db, err := NewBigCache(func(key string, entry []byte, reason RemoveReason) {
+		t.Logf("Remove [%s], reason[%d]\n", key, reason)
+	})
+	require.NoError(t, err)
+	defer func() {
+		err := db.Close()
+		require.NoError(t, err)
+	}()
+
+	key := fmt.Sprintf("key_%d", 1)
+	//key := "key1"
+	err = db.Set(key, []byte("value"))
+	require.NoError(t, err)
+
+	cache, err := db.GetCache()
+	require.NoError(t, err)
+	err = cache.Append(key, []byte("2value2"))
+	require.NoError(t, err)
+
+	v, err := db.Get(key)
+	require.NoError(t, err)
+	t.Log(string(v))
 }

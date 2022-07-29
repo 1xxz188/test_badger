@@ -25,11 +25,13 @@ const (
 type Cache interface {
 	Get(key string) ([]byte, error)
 	Set(key string, entry []byte) error
+	Delete(key string) error
+	Len() int
 	Close() error
 }
 
 /*
 1. 数据过期时保存
 2. 退出程序时保存
-3. 定期保存
+3. 定期保存(改为尽最大能力保存)
 */
