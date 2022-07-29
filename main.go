@@ -466,13 +466,13 @@ func main() {
 	isClose := false
 
 	for i := 0; i < goSendCnt; i++ {
-		proxyDB.c.WGAdd(1)
+		proxyDB.c.ProducerAdd(1)
 		go func(sendId int) {
 			chClose := make(chan struct{})
 
 			defer func() {
 				close(chClose)
-				proxyDB.c.WGDone()
+				proxyDB.c.ProducerDone()
 			}()
 
 			var updateInfo Collect
@@ -627,9 +627,9 @@ func main() {
 	var gcMaxMs int64
 	var gcMaxMB int64
 	var gcRunOKCnt int64
-	proxyDB.c.WG3Add(1)
+	proxyDB.c.AllAdd(1)
 	go func() {
-		defer proxyDB.c.WG3Done()
+		defer proxyDB.c.AllDone()
 
 		gcRate := *kGcRate
 		log.Printf("Start GC Rate[%0.6f]\n", gcRate)
@@ -716,7 +716,7 @@ func main() {
 						}
 					}
 				}()
-				proxyDB.c.WG2Wait() //wait all data save
+				proxyDB.c.ConsumerWait() //wait all data save
 				close(exitGCChan)
 				wgGCExit.Wait() //等待完全GC
 				return
@@ -731,15 +731,15 @@ func main() {
 	sg := make(chan os.Signal, 1)
 	go func() {
 		<-proxyDB.c.CTXDone()
-		proxyDB.c.WGWait()
+		proxyDB.c.ProducerWait()
 		diffExeTm := time.Since(openTm)
 		log.Printf("EXE Tm[%s] totalSendCnt: %d, QPS: %0.3f --> %0.3f, gcMax[%d ms] gcMax[%d MB] gcRunOKCnt[%d]\n", diffExeTm.String(), totalSendCnt, float64(totalSendCnt)/diffExeTm.Seconds(), float64(totalSendCnt)/diffExeTm.Seconds()/2, gcMaxMs, gcMaxMB, gcRunOKCnt)
 
-		proxyDB.c.WG2Wait()
+		proxyDB.c.ConsumerWait()
 		diffWG2Tm := time.Since(openTm)
 		log.Printf("WG2Wait All EXE Tm[%s]", diffWG2Tm.String())
 
-		proxyDB.c.WG3Wait()
+		proxyDB.c.AllWait()
 		diffWG3Tm := time.Since(openTm)
 		log.Printf("WG3Wait All EXE Tm[%s]", diffWG3Tm.String())
 
@@ -752,7 +752,7 @@ func main() {
 		fmt.Println("the app will shutdown.")
 		proxyDB.c.CTXCancel()
 		isClose = true
-		proxyDB.c.WG3Wait()
+		proxyDB.c.AllWait()
 	}
 
 	now := time.Now()

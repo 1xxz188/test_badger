@@ -62,9 +62,9 @@ func CreateDBProxy(db *badger.DB, c *controlEXE.ControlEXE) (*DBProxy, error) {
 	}
 	proxy.cache = cache
 
-	c.WG2Add(1)
+	c.ConsumerAdd(1)
 	go func() {
-		defer c.WG2Done()
+		defer c.ConsumerDone()
 		//interval save
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
@@ -110,7 +110,7 @@ func CreateDBProxy(db *badger.DB, c *controlEXE.ControlEXE) (*DBProxy, error) {
 				saveData()
 			case <-c.CTXDone():
 				//wait all data save
-				c.WGWait() //wait all send data coroutine exit
+				c.ProducerWait() //wait all send data coroutine exit
 				fmt.Println("wait all data save")
 				saveData()
 				fmt.Println("all data save ok")
