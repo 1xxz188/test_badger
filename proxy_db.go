@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"github.com/dgraph-io/badger/v3"
-	"github.com/golang/groupcache/singleflight"
 	cmap "github.com/orcaman/concurrent-map"
 	"sync/atomic"
 	"test_badger/cachedb"
@@ -13,14 +12,11 @@ import (
 )
 
 type DBProxy struct {
-	db        *badger.DB
-	cache     cachedb.Cache
-	c         *controlEXE.ControlEXE
-	noSaveMap cmap.ConcurrentMap
-	g         singleflight.Group
-
-	cachePenetrateCnt uint32 //穿透缓存次数
-	loadDBCnt         uint32 //加载DB次数 TODO 分开64字节
+	db                *badger.DB
+	cache             cachedb.Cache
+	c                 *controlEXE.ControlEXE
+	noSaveMap         cmap.ConcurrentMap //待保存列表
+	cachePenetrateCnt uint32             //穿透缓存次数
 }
 
 func CreateDBProxy(db *badger.DB, c *controlEXE.ControlEXE) (*DBProxy, error) {
@@ -38,6 +34,7 @@ func CreateDBProxy(db *badger.DB, c *controlEXE.ControlEXE) (*DBProxy, error) {
 	}
 
 	cache, err := cachedb.NewBigCache(func(key string, entry []byte, reason cachedb.RemoveReason) {
+		//进入缓存淘汰 TODO 移除过程中 发生新数据变化处理
 		//fmt.Printf("Remove [%s], reason[%d]\n", key, reason)
 		if reason == cachedb.Deleted {
 			return //定期保存的时候自然会过滤掉已删除的key
@@ -124,60 +121,34 @@ func CreateDBProxy(db *badger.DB, c *controlEXE.ControlEXE) (*DBProxy, error) {
 func (proxy *DBProxy) GetCachePenetrateCnt() uint32 {
 	return atomic.LoadUint32(&proxy.cachePenetrateCnt)
 }
-func (proxy *DBProxy) GetLoadDBCnt() uint32 {
-	return atomic.LoadUint32(&proxy.loadDBCnt)
-}
 
 func (proxy *DBProxy) Get(txn *badger.Txn, key string) ([]byte, error) {
 	data, err := proxy.cache.Get(key)
-	if err != nil {
-		if err != cachedb.ErrEntryNotFound {
-			return nil, err
-		}
-
-		atomic.AddUint32(&proxy.cachePenetrateCnt, 1)
-
-		//穿透到badger
-		/*item, err := txn.Get([]byte(key))
-		if err != nil {
-			return nil, err
-		}
-		data, err := item.ValueCopy(nil)
-		if err != nil {
-			return nil, err
-		}
-		//更新到缓存中
-		err = proxy.cache.Set(key, data)
-		if err != nil {
-			return nil, err
-		}
-		return data, nil*/
-		//TODO 查一下 badger里面是否保证了缓存击穿
-		data, err := proxy.g.Do(key, func() (interface{}, error) { //TODO 改为模板封装
-			atomic.AddUint32(&proxy.loadDBCnt, 1)
-			//穿透到badger
-			item, err := txn.Get([]byte(key))
-			if err != nil {
-				return nil, err
-			}
-			v, err := item.ValueCopy(nil)
-			if err != nil {
-				return nil, err
-			}
-			return v, nil
-		})
-		if err != nil {
-			return nil, err
-		}
-
-		//更新到缓存中
-		err = proxy.cache.Set(key, data.([]byte))
-		if err != nil {
-			return nil, err
-		}
-		return data.([]byte), nil
+	if err == nil {
+		return data, nil //命中缓存返回数据
 	}
-	return data, nil
+	if err != cachedb.ErrEntryNotFound {
+		return nil, err
+	}
+
+	atomic.AddUint32(&proxy.cachePenetrateCnt, 1)
+
+	//穿透到badger
+	item, err := txn.Get([]byte(key))
+	if err != nil {
+		return nil, err
+	}
+	v, err := item.ValueCopy(nil)
+	if err != nil {
+		return nil, err
+	}
+
+	//更新到缓存中
+	err = proxy.cache.Set(key, v)
+	if err != nil {
+		return nil, err
+	}
+	return v, nil
 }
 
 func (proxy *DBProxy) Set(key string, entry []byte) error {

@@ -773,5 +773,5 @@ func main() {
 	now = time.Now()
 	fmt.Printf("[%d] Map_ cost: %s\n", GetPreDBCount(db, "Map_"), time.Since(now).String())
 
-	fmt.Printf("GetCachePenetrateCnt: %d, GetLoadDBCnt: %d \n", proxyDB.GetCachePenetrateCnt(), proxyDB.GetLoadDBCnt())
+	fmt.Printf("GetCachePenetrateCnt: %d\n", proxyDB.GetCachePenetrateCnt())
 }

@@ -95,9 +95,9 @@ func TestSave(t *testing.T) {
 	intervalV := 10000
 
 	for idx := 0; idx < 4; idx++ {
-		c.WGAdd(1)
+		c.ProducerAdd(1)
 		go func(c *controlEXE.ControlEXE, idx int) {
-			defer c.WGDone()
+			defer c.ProducerDone()
 			ticker := time.NewTicker(time.Millisecond * 10)
 			defer ticker.Stop()
 			count := 0
@@ -129,7 +129,7 @@ func TestSave(t *testing.T) {
 	}
 
 	<-c.CTXDone()
-	c.WG2Wait()
+	c.ConsumerWait()
 	fmt.Println("Main Exit...")
 	//Print(db)
 }
