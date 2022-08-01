@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"github.com/dgraph-io/badger/v3"
 	cmap "github.com/orcaman/concurrent-map"
+	"log"
 	"sync/atomic"
 	"test_badger/cachedb"
 	"test_badger/controlEXE"
+	"test_badger/customWatchKey"
 	"time"
 )
 
@@ -15,6 +17,7 @@ type DBProxy struct {
 	db                *badger.DB
 	cache             cachedb.Cache
 	c                 *controlEXE.ControlEXE
+	watchKeyMgr       *customWatchKey.WatchKeyMgr
 	noSaveMap         cmap.ConcurrentMap //待保存列表
 	cachePenetrateCnt uint32             //穿透缓存次数
 }
@@ -27,30 +30,38 @@ func CreateDBProxy(db *badger.DB, c *controlEXE.ControlEXE) (*DBProxy, error) {
 		return nil, errors.New("CreateDBProxy c == nil")
 	}
 
+	watchKeyMgr, err := customWatchKey.New(1024)
+	if err != nil {
+		return nil, err
+	}
 	proxy := &DBProxy{
-		db:        db,
-		c:         c,
-		noSaveMap: cmap.New(),
+		db:          db,
+		c:           c,
+		watchKeyMgr: watchKeyMgr,
+		noSaveMap:   cmap.New(),
 	}
 
 	cache, err := cachedb.NewBigCache(func(key string, entry []byte, reason cachedb.RemoveReason) {
-		//进入缓存淘汰 TODO 移除过程中 发生新数据变化处理
+		//进入缓存淘汰
 		//fmt.Printf("Remove [%s], reason[%d]\n", key, reason)
 		if reason == cachedb.Deleted {
 			return //定期保存的时候自然会过滤掉已删除的key
 		}
-		//如果未保存则保存
-		_, ok := proxy.noSaveMap.Get(key)
-		if !ok {
-			return
-		}
-		proxy.noSaveMap.Remove(key)
-		err := proxy.db.Update(func(txn *badger.Txn) error {
-			fmt.Printf("warning save by remove key[%s] reason[%d]\n", key, reason)
-			return txn.Set([]byte(key), entry)
+		//TODO watchKey
+		err := watchKeyMgr.Write(key, 0, false, func(keyVersion uint32) error {
+			//如果未保存则保存
+			_, ok := proxy.noSaveMap.Get(key)
+			if !ok {
+				return nil
+			}
+			proxy.noSaveMap.Remove(key)
+			return proxy.db.Update(func(txn *badger.Txn) error {
+				fmt.Printf("warning save by remove key[%s] reason[%d]\n", key, reason)
+				return txn.Set([]byte(key), entry)
+			})
 		})
 		if err != nil {
-			panic(err)
+			log.Panic(err)
 		}
 	})
 
@@ -151,10 +162,25 @@ func (proxy *DBProxy) Get(txn *badger.Txn, key string) ([]byte, error) {
 	return v, nil
 }
 
-func (proxy *DBProxy) Set(key string, entry []byte) error {
+func (proxy *DBProxy) set(key string, entry []byte) error {
 	if err := proxy.cache.Set(key, entry); err != nil {
 		return err
 	}
 	proxy.noSaveMap.Set(key, nil)
 	return nil
+}
+
+func (proxy *DBProxy) Sets(watchKey string, keys []string, entryList [][]byte) error {
+	if len(keys) != len(entryList) {
+		return errors.New("len(keys) != len(entryList)")
+	}
+	return proxy.watchKeyMgr.Write(watchKey, 0, false, func(keyVersion uint32) error {
+		for i := 0; i < len(keys); i++ {
+			err := proxy.set(keys[i], entryList[i])
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }

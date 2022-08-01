@@ -81,7 +81,7 @@ func (s *WatchKeyMgr) Read(key string, fn func(keyVersion uint32) error) (err er
 	return err
 }
 
-func (s *WatchKeyMgr) Write(key string, keyVersion uint32, fn func(keyVersion uint32) error) error {
+func (s *WatchKeyMgr) Write(key string, keyVersion uint32, isCheckKeyVersion bool, fn func(keyVersion uint32) error) error {
 	shard := s.getShard(key)
 	shard.lock.RLock()
 	// Get item from shard.
@@ -93,7 +93,7 @@ func (s *WatchKeyMgr) Write(key string, keyVersion uint32, fn func(keyVersion ui
 	shard.lock.RUnlock()
 	val.lock.Lock()
 	defer val.lock.Unlock() //prevent panic
-	if keyVersion != val.version {
+	if isCheckKeyVersion && keyVersion != val.version {
 		return ErrWatchVersionConflicts
 	}
 	err := fn(val.version)

@@ -20,7 +20,7 @@ func TestReadWrite(t *testing.T) {
 	s, err := New(5)
 	require.NoError(t, err)
 
-	err = s.Write("key1", 1, func(keyVersion uint32) error {
+	err = s.Write("key1", 1, true, func(keyVersion uint32) error {
 		require.Equal(t, uint32(1), keyVersion)
 		return nil
 	})
@@ -32,13 +32,13 @@ func TestReadWrite(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	err = s.Write("key1", 1, func(keyVersion uint32) error {
+	err = s.Write("key1", 1, true, func(keyVersion uint32) error {
 		require.Equal(t, uint32(1), keyVersion)
 		return nil
 	})
 	require.NoError(t, err)
 
-	err = s.Write("key1", 2, func(keyVersion uint32) error {
+	err = s.Write("key1", 2, true, func(keyVersion uint32) error {
 		require.Equal(t, uint32(2), keyVersion)
 		return nil
 	})
@@ -97,7 +97,7 @@ func TestWatchUpdateConcurrency(t *testing.T) {
 			<-beginChan
 			defer wg.Done()
 			for {
-				err := s.Write("key1", version, func(keyVersion uint32) error {
+				err := s.Write("key1", version, true, func(keyVersion uint32) error {
 					require.Equal(t, version, keyVersion)
 					return nil
 				})

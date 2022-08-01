@@ -106,14 +106,24 @@ func TestSave(t *testing.T) {
 				case _ = <-ticker.C:
 					count++
 					//now := time.Now()
+					var keyList []string
+					var valueList [][]byte
+
 					for i := idx * intervalV; i < idx*intervalV+intervalV; i++ {
 						key := fmt.Sprintf("key_%d", i)
-						value := fmt.Sprintf("value_%d_%d", i, count)
+						value := []byte(fmt.Sprintf("value_%d_%d", i, count))
 						//fmt.Printf("Set key: %s\n", string(key))
-						err = proxy.Set(key, []byte(value))
-						require.NoError(t, err)
-						atomic.AddUint32(&setCnt, 1)
+						keyList = append(keyList, key)
+						valueList = append(valueList, value)
 					}
+					watchKey := fmt.Sprintf("key_%d", idx)
+					err = proxy.watchKeyMgr.Read(watchKey, func(keyVersion uint32) error {
+						return nil
+					})
+					require.NoError(t, err)
+					err = proxy.Sets(watchKey, keyList, valueList)
+					require.NoError(t, err)
+					atomic.AddUint32(&setCnt, 1)
 					//fmt.Printf("Set cost[%d ms]\n", time.Since(now).Milliseconds())
 					//time.Sleep(time.Second)
 					if count > 1200 {

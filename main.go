@@ -10,16 +10,15 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
-	"sync"
-	"test_badger/controlEXE"
-
 	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"syscall"
+	"test_badger/controlEXE"
 	"test_badger/rateLimiter"
 	"time"
 	"unsafe"
@@ -197,20 +196,25 @@ func fnBatchUpdate2(db *DBProxy, info *Collect, id int) error {
 		return m
 	}
 	insertData := data(dataLen)
+
+	var keyList []string
+	keyList = append(keyList, "Role_"+strconv.Itoa(10000000+id))
+	keyList = append(keyList, "Item_"+strconv.Itoa(10000000+id))
+	keyList = append(keyList, "Build_"+strconv.Itoa(10000000+id))
+	keyList = append(keyList, "Home_"+strconv.Itoa(10000000+id))
+	keyList = append(keyList, "Map_"+strconv.Itoa(10000000+id))
+
+	var valueList [][]byte
+	valueList = append(valueList, insertData)
+	valueList = append(valueList, insertData)
+	valueList = append(valueList, insertData)
+	valueList = append(valueList, insertData)
+	valueList = append(valueList, insertData)
 	beginTm := time.Now()
-	if err := db.Set("Role_"+strconv.Itoa(10000000+id), insertData); err != nil {
-		return err
-	}
-	if err := db.Set("Item_"+strconv.Itoa(10000000+id), insertData); err != nil {
-		return err
-	}
-	if err := db.Set("Build_"+strconv.Itoa(10000000+id), insertData); err != nil {
-		return err
-	}
-	if err := db.Set("Home_"+strconv.Itoa(10000000+id), insertData); err != nil {
-		return err
-	}
-	if err := db.Set("Map_"+strconv.Itoa(10000000+id), insertData); err != nil {
+
+	watchKey := "Watch_" + strconv.Itoa(10000000+id)
+	err := db.Sets(watchKey, keyList, valueList)
+	if err != nil {
 		return err
 	}
 	diffMS := time.Since(beginTm).Milliseconds()
@@ -455,6 +459,9 @@ func main() {
 	}
 	log.Printf("openTm[%d ms] dataLen[%d], lsmMaxValue[%d] originalDirSize[%d MB]\n", time.Since(openTm).Milliseconds(), dataLen, *lsmMaxValue, originalDirSize)
 
+	if err != nil {
+		panic(err)
+	}
 	proxyDB, err := CreateDBProxy(db, controlEXE.CreateControlEXE())
 	if err != nil {
 		panic(err)
