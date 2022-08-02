@@ -243,37 +243,24 @@ func fnBatchUpdate2(db *DBProxy, info *Collect, id int) error {
 }
 
 func fnBatchRead2(db *DBProxy, info *Collect, id int) error {
-	key1 := "Role_" + strconv.Itoa(10000000+id)
-	key2 := "Item_" + strconv.Itoa(10000000+id)
-	key3 := "Build_" + strconv.Itoa(10000000+id)
-	key4 := "Home_" + strconv.Itoa(10000000+id)
-	key5 := "Map_" + strconv.Itoa(10000000+id)
-
-	txn := db.db.NewTransaction(false)
-	defer txn.Discard()
-
+	var keyList []string
+	keyList = append(keyList, "Role_"+strconv.Itoa(10000000+id))
+	keyList = append(keyList, "Item_"+strconv.Itoa(10000000+id))
+	keyList = append(keyList, "Build_"+strconv.Itoa(10000000+id))
+	keyList = append(keyList, "Home_"+strconv.Itoa(10000000+id))
+	keyList = append(keyList, "Map_"+strconv.Itoa(10000000+id))
+	watchKey := "Watch_" + strconv.Itoa(10000000+id)
 	beginTm := time.Now()
-	item, err := db.Get(txn, key1)
-	if err != nil {
-		return err
+
+	items, _ := db.Gets(watchKey, keyList)
+	if len(items) != len(keyList) {
+		panic("len(items) != len(keyList)")
 	}
-	item, err = db.Get(txn, key2)
-	if err != nil {
-		return err
+	for _, item := range items {
+		if item.err != nil {
+			panic(item.err)
+		}
 	}
-	item, err = db.Get(txn, key3)
-	if err != nil {
-		return err
-	}
-	item, err = db.Get(txn, key4)
-	if err != nil {
-		return err
-	}
-	item, err = db.Get(txn, key5)
-	if err != nil {
-		return err
-	}
-	noUse(item)
 	diffMS := time.Since(beginTm).Milliseconds()
 	diffMic := time.Since(beginTm).Microseconds()
 	info.totalMic += diffMic

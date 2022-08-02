@@ -133,7 +133,7 @@ func (proxy *DBProxy) GetCachePenetrateCnt() uint32 {
 	return atomic.LoadUint32(&proxy.cachePenetrateCnt)
 }
 
-func (proxy *DBProxy) Get(txn *badger.Txn, key string) ([]byte, error) {
+func (proxy *DBProxy) get(txn *badger.Txn, key string) ([]byte, error) {
 	data, err := proxy.cache.Get(key)
 	if err == nil {
 		return data, nil //命中缓存返回数据
@@ -147,6 +147,9 @@ func (proxy *DBProxy) Get(txn *badger.Txn, key string) ([]byte, error) {
 	//穿透到badger
 	item, err := txn.Get([]byte(key))
 	if err != nil {
+		if err == badger.ErrKeyNotFound { //转换错误
+			return nil, cachedb.ErrEntryNotFound
+		}
 		return nil, err
 	}
 	v, err := item.ValueCopy(nil)
@@ -162,6 +165,30 @@ func (proxy *DBProxy) Get(txn *badger.Txn, key string) ([]byte, error) {
 	return v, nil
 }
 
+type KV struct {
+	k   string
+	v   []byte
+	err error
+}
+
+func (proxy *DBProxy) Gets(watchKey string, keys []string) (result []KV, version uint32) {
+	_ = proxy.watchKeyMgr.Read(watchKey, func(keyVersion uint32) error {
+		version = keyVersion
+		txn := proxy.db.NewTransaction(false)
+		defer txn.Discard()
+
+		for _, key := range keys {
+			item, err := proxy.get(txn, key)
+			result = append(result, KV{
+				k:   key,
+				v:   item,
+				err: err,
+			})
+		}
+		return nil
+	})
+	return result, version
+}
 func (proxy *DBProxy) set(key string, entry []byte) error {
 	if err := proxy.cache.Set(key, entry); err != nil {
 		return err
@@ -170,11 +197,27 @@ func (proxy *DBProxy) set(key string, entry []byte) error {
 	return nil
 }
 
+// Sets TODO 改protobuf结构参数
 func (proxy *DBProxy) Sets(watchKey string, keys []string, entryList [][]byte) error {
 	if len(keys) != len(entryList) {
 		return errors.New("len(keys) != len(entryList)")
 	}
 	return proxy.watchKeyMgr.Write(watchKey, 0, false, func(keyVersion uint32) error {
+		for i := 0; i < len(keys); i++ {
+			err := proxy.set(keys[i], entryList[i])
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func (proxy *DBProxy) SetsByVersion(watchKey string, keyVersion uint32, keys []string, entryList [][]byte) error {
+	if len(keys) != len(entryList) {
+		return errors.New("len(keys) != len(entryList)")
+	}
+	return proxy.watchKeyMgr.Write(watchKey, keyVersion, true, func(keyVersion uint32) error {
 		for i := 0; i < len(keys); i++ {
 			err := proxy.set(keys[i], entryList[i])
 			if err != nil {

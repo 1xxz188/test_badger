@@ -9,6 +9,7 @@ import (
 	"log"
 	"sync"
 	"sync/atomic"
+	"test_badger/cachedb"
 	"test_badger/controlEXE"
 	"testing"
 	"time"
@@ -44,14 +45,95 @@ func BenchmarkSave(b *testing.B) {
 	*/
 }
 
+func TestReadDB(t *testing.T) {
+	fn1 := func() {
+		db, err := badger.Open(CreateDefaultOptions()) //.WithMemTableSize(1024 * 2)
+		require.NoError(t, err)
+		defer func() {
+			//err := db.DropAll()
+			//require.NoError(t, err)
+			err := db.Close()
+			require.NoError(t, err)
+		}()
+
+		c := controlEXE.CreateControlEXE()
+		proxy, err := CreateDBProxy(db, c)
+		require.NoError(t, err)
+
+		watchKey := "watchKey1"
+		keys := []string{"key1"}
+		kvList, version := proxy.Gets(watchKey, keys)
+		require.Equal(t, 1, len(kvList))
+		require.Equal(t, uint32(1), version)
+		for _, kv := range kvList {
+			//t.Logf("[%d] %+v\n", i, kv)
+			require.Equal(t, cachedb.ErrEntryNotFound, kv.err)
+		}
+
+		entryList := [][]byte{[]byte("v1")}
+		err = proxy.SetsByVersion(watchKey, version, keys, entryList)
+		require.NoError(t, err)
+
+		kvList, version = proxy.Gets(watchKey, keys)
+		require.Equal(t, 1, len(kvList))
+		require.Equal(t, uint32(2), version)
+		for i, kv := range kvList {
+			require.Equal(t, nil, kv.err)
+			t.Logf("[%d] %+v\n", i, kv)
+		}
+
+		entryList = [][]byte{[]byte("v2")}
+		err = proxy.SetsByVersion(watchKey, version, keys, entryList)
+		require.NoError(t, err)
+
+		c.CTXCancel() //触发退出信号
+		<-c.CTXDone()
+		c.ProducerWait()
+		c.ConsumerWait()
+		c.AllWait()
+		fmt.Println("1 Exit...")
+	}
+
+	fn2 := func() {
+		db, err := badger.Open(CreateDefaultOptions()) //.WithMemTableSize(1024 * 2)
+		require.NoError(t, err)
+		defer func() {
+			err := db.DropAll()
+			require.NoError(t, err)
+			err = db.Close()
+			require.NoError(t, err)
+		}()
+
+		c := controlEXE.CreateControlEXE()
+		proxy, err := CreateDBProxy(db, c)
+		require.NoError(t, err)
+
+		watchKey := "watchKey1"
+		keys := []string{"key1"}
+		kvList, version := proxy.Gets(watchKey, keys)
+		require.Equal(t, 1, len(kvList))
+		require.Equal(t, uint32(1), version)
+		for _, kv := range kvList {
+			//t.Logf("[%d] %+v\n", i, kv)
+			require.Equal(t, nil, kv.err)
+			require.Equal(t, []byte("v2"), kv.v)
+		}
+
+		c.CTXCancel() //触发退出信号
+		<-c.CTXDone()
+		c.ProducerWait()
+		c.ConsumerWait()
+		c.AllWait()
+		fmt.Println("2 Exit...")
+	}
+	fn1()
+	fn2()
+}
+
 func TestSave(t *testing.T) {
 	db, err := badger.Open(CreateDefaultOptions()) //.WithMemTableSize(1024 * 2)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer db.Close()
-
 	require.NoError(t, err)
+
 	defer func() {
 		err := db.Close()
 		require.NoError(t, err)
@@ -76,70 +158,96 @@ func TestSave(t *testing.T) {
 		require.NoError(t, err)
 	}*/
 
-	txn := db.NewTransaction(false)
-	_, err = proxy.Get(txn, "key_1")
-	require.NoError(t, err)
-	txn.Discard()
+	var keyList []string
+	keyList = append(keyList, "key_1")
+	watchKey := "watchKey_1"
+	items, _ := proxy.Gets(watchKey, keyList)
+	if len(items) != len(keyList) {
+		panic("len(items) != len(keyList)")
+	}
+	for _, item := range items {
+		if item.err != nil {
+			require.NoError(t, err)
+		}
+	}
 
 	setCnt := uint32(0)
+	chPrintGo := make(chan struct{})
 	go func() {
 		lastCnt := uint32(0)
+		ticker := time.NewTicker(time.Second)
+		c.AllAdd(1)
+		defer func() {
+			ticker.Stop()
+			c.AllDone()
+		}()
+
 		for {
-			time.Sleep(time.Second)
-			nowCnt := atomic.LoadUint32(&setCnt)
-			fmt.Println("qps: ", nowCnt-lastCnt)
-			lastCnt = nowCnt
+			select {
+			case _ = <-ticker.C:
+				nowCnt := atomic.LoadUint32(&setCnt)
+				fmt.Println("qps: ", nowCnt-lastCnt)
+				lastCnt = nowCnt
+			case <-chPrintGo:
+				fmt.Println("chPrintGo exit")
+				return
+			}
 		}
 	}()
 
 	intervalV := 10000
 
 	for idx := 0; idx < 4; idx++ {
-		c.ProducerAdd(1)
-		go func(c *controlEXE.ControlEXE, idx int) {
-			defer c.ProducerDone()
-			ticker := time.NewTicker(time.Millisecond * 10)
-			defer ticker.Stop()
-			count := 0
-			for {
-				select {
-				case _ = <-ticker.C:
-					count++
-					//now := time.Now()
-					var keyList []string
-					var valueList [][]byte
+		//4个并发竞争
+		for ii := 0; ii < 4; ii++ {
+			c.ProducerAdd(1)
+			go func(c *controlEXE.ControlEXE, idx int) {
+				defer c.ProducerDone()
+				ticker := time.NewTicker(time.Millisecond * 10)
+				defer ticker.Stop()
+				count := 0
+				for {
+					select {
+					case _ = <-ticker.C:
+						count++
+						//now := time.Now()
+						var keyList []string
+						var valueList [][]byte
 
-					for i := idx * intervalV; i < idx*intervalV+intervalV; i++ {
-						key := fmt.Sprintf("key_%d", i)
-						value := []byte(fmt.Sprintf("value_%d_%d", i, count))
-						//fmt.Printf("Set key: %s\n", string(key))
-						keyList = append(keyList, key)
-						valueList = append(valueList, value)
+						for i := idx * intervalV; i < idx*intervalV+intervalV; i++ {
+							key := fmt.Sprintf("key_%d", i)
+							value := []byte(fmt.Sprintf("value_%d_%d", i, count))
+							//fmt.Printf("Set key: %s\n", string(key))
+							keyList = append(keyList, key)
+							valueList = append(valueList, value)
+						}
+						watchKey := fmt.Sprintf("watchKey_%d", idx)
+						err = proxy.watchKeyMgr.Read(watchKey, func(keyVersion uint32) error {
+							return nil
+						})
+						require.NoError(t, err)
+						err = proxy.Sets(watchKey, keyList, valueList)
+						require.NoError(t, err)
+						atomic.AddUint32(&setCnt, 1)
+						//fmt.Printf("Set cost[%d ms]\n", time.Since(now).Milliseconds())
+						//time.Sleep(time.Second)
+						if count > 1200 {
+							c.CTXCancel()
+							return
+						}
+						/*case <-c.CTXDone(): //TODO 不能取消
+						if count <= 10 {
+						}return*/
 					}
-					watchKey := fmt.Sprintf("key_%d", idx)
-					err = proxy.watchKeyMgr.Read(watchKey, func(keyVersion uint32) error {
-						return nil
-					})
-					require.NoError(t, err)
-					err = proxy.Sets(watchKey, keyList, valueList)
-					require.NoError(t, err)
-					atomic.AddUint32(&setCnt, 1)
-					//fmt.Printf("Set cost[%d ms]\n", time.Since(now).Milliseconds())
-					//time.Sleep(time.Second)
-					if count > 1200 {
-						c.CTXCancel()
-						return
-					}
-					/*case <-c.CTXDone(): //TODO 不能取消
-					if count <= 10 {
-					}return*/
 				}
-			}
-		}(c, idx)
+			}(c, idx)
+		}
 	}
 
 	<-c.CTXDone()
 	c.ConsumerWait()
+	close(chPrintGo)
+	c.AllWait()
 	fmt.Println("Main Exit...")
 	//Print(db)
 }
