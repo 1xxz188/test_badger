@@ -91,7 +91,6 @@ func fnBatchUpdate(db *badger.DB, info *Collect, id int) error {
 	info.setCount++
 	return nil
 }
-
 func fnBatchRead(db *badger.DB, info *Collect, id int) error {
 	txn := db.NewTransaction(false)
 	defer txn.Discard()
@@ -181,8 +180,8 @@ func fnBatchUpdate2(db *proxy.DBProxy, info *Collect, id int) error {
 
 	beginTm := time.Now()
 
-	watchKey := "Watch_" + strconv.Itoa(10000000+id)
-	err := db.Sets(watchKey, keyList, valueList)
+	//watchKey := "Watch_" + strconv.Itoa(10000000+id)
+	err := db.Sets("", keyList, valueList)
 	if err != nil {
 		return err
 	}
@@ -300,7 +299,12 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	defer proxyDB.Close()
+	defer func() {
+		err := proxyDB.Close()
+		if err != nil {
+			panic(err)
+		}
+	}()
 
 	//开启GC
 	go proxyDB.RunGC(*kGcRate)
@@ -386,12 +390,13 @@ func main() {
 		go func() {
 			defer close(chId)
 			log.Printf("begin insert num[%d]\n", *kInsertNum)
+			curBeginId := *kCurBeginId
 			for i := 0; i < *kInsertNum; i++ {
 				if isClose {
 					proxyDB.C.CTXCancel()
 					return
 				}
-				chId <- i
+				chId <- curBeginId + i
 			}
 			proxyDB.C.CTXCancel()
 		}()

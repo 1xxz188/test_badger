@@ -3,62 +3,38 @@ package proxy
 import (
 	"context"
 	"fmt"
-	"github.com/dgraph-io/badger/v3"
 	"github.com/golang/groupcache/singleflight"
 	"github.com/stretchr/testify/require"
-	"log"
 	"sync"
 	"sync/atomic"
+	"test_badger/badgerApi"
 	"test_badger/cachedb"
 	"test_badger/controlEXE"
 	"testing"
 	"time"
 )
 
-func CreateDefaultOptions() badger.Options {
-	dir := "./data"
-	opt := badger.DefaultOptions(dir).
-		WithCompactL0OnClose(true).  //退出处理LO压缩
-		WithDetectConflicts(false).  //禁用版本冲突(由业务层保障)
-		WithBlockCacheSize(2 << 30). //如果加密和压缩开启时，需要开启，否则关闭
-		WithValueThreshold(65)       // 小值放LSM树，默认1MB
-	return opt
-}
+func TestPrint(t *testing.T) {
+	c := controlEXE.CreateControlEXE()
+	proxy, err := CreateDBProxy(c, "./data")
+	require.NoError(t, err)
+	defer func() {
+		err := proxy.Close()
+		require.NoError(t, err)
+	}()
 
-func BenchmarkSave(b *testing.B) {
-	/*intervalV := b.N
-
-	for idx := 0; idx < 10; idx++ {
-		go func(idx int) {
-			for i := idx * intervalV; i < idx*intervalV+intervalV; i++ {
-				key := fmt.Sprintf("key_%d", i)
-				value := fmt.Sprintf("value_%d_%d", i, count)
-				//fmt.Printf("Set key: %s\n", string(key))
-				err := proxy.Set(key, []byte(value))
-				if err != nil {
-					log.Fatal(err)
-				}
-				atomic.AddUint32(&setCnt, 1)
-			}
-		}(idx)
-	}
-	*/
+	badgerApi.Print(proxy.DB)
 }
 
 func TestReadDB(t *testing.T) {
 	fn1 := func() {
-		db, err := badger.Open(CreateDefaultOptions()) //.WithMemTableSize(1024 * 2)
+		c := controlEXE.CreateControlEXE()
+		proxy, err := CreateDBProxy(c, "./data")
 		require.NoError(t, err)
 		defer func() {
-			//err := db.DropAll()
-			//require.NoError(t, err)
-			err := db.Close()
+			err := proxy.Close()
 			require.NoError(t, err)
 		}()
-
-		c := controlEXE.CreateControlEXE()
-		proxy, err := CreateDBProxy(db, c)
-		require.NoError(t, err)
 
 		watchKey := "watchKey1"
 		keys := []string{"key1"}
@@ -95,18 +71,16 @@ func TestReadDB(t *testing.T) {
 	}
 
 	fn2 := func() {
-		db, err := badger.Open(CreateDefaultOptions()) //.WithMemTableSize(1024 * 2)
+		c := controlEXE.CreateControlEXE()
+		proxy, err := CreateDBProxy(c, "./data")
 		require.NoError(t, err)
+
 		defer func() {
-			err := db.DropAll()
+			err := proxy.DB.DropAll()
 			require.NoError(t, err)
-			err = db.Close()
+			err = proxy.Close()
 			require.NoError(t, err)
 		}()
-
-		c := controlEXE.CreateControlEXE()
-		proxy, err := CreateDBProxy(db, c)
-		require.NoError(t, err)
 
 		watchKey := "watchKey1"
 		keys := []string{"key1"}
@@ -131,16 +105,12 @@ func TestReadDB(t *testing.T) {
 }
 
 func TestSave(t *testing.T) {
-	db, err := badger.Open(CreateDefaultOptions()) //.WithMemTableSize(1024 * 2)
-	require.NoError(t, err)
-
+	c := controlEXE.CreateControlEXE()
+	proxy, err := CreateDBProxy(c, "./data")
 	defer func() {
-		err := db.Close()
+		err := proxy.Close()
 		require.NoError(t, err)
 	}()
-
-	c := controlEXE.CreateControlEXE()
-	proxy, err := CreateDBProxy(db, c)
 	require.NoError(t, err)
 
 	/*data := func(l int) []byte {
@@ -250,29 +220,6 @@ func TestSave(t *testing.T) {
 	c.AllWait()
 	fmt.Println("Main Exit...")
 	//Print(db)
-}
-
-//TODO 模糊测试
-func TestCheckDB(t *testing.T) {
-	db, err := badger.Open(CreateDefaultOptions())
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer db.Close()
-
-	now := time.Now()
-	txn := db.NewTransaction(false)
-	defer txn.Discard()
-
-	for i := 0; i < 1*80000*10; i++ {
-		key := fmt.Sprintf("key_%d", i)
-		value := fmt.Sprintf("value_%d_%d", i, 121)
-		item, err := txn.Get([]byte(key))
-		require.NoError(t, err)
-		val, err := item.ValueCopy(nil)
-		require.Equal(t, value, string(val))
-	}
-	fmt.Printf(">[%d ms]\n", time.Since(now).Milliseconds())
 }
 
 func TestContext(t *testing.T) {

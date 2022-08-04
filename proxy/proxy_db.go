@@ -67,27 +67,21 @@ func CreateDBProxy(c *controlEXE.ControlEXE, dbDir string) (*DBProxy, error) {
 	}
 
 	cache, err := cachedb.NewBigCache(func(key string, entry []byte, reason cachedb.RemoveReason) {
-		//进入缓存淘汰
+		//进入缓存淘汰，不存在移除的时候同时插入(底层有分片锁)
 		//fmt.Printf("Remove [%s], reason[%d]\n", key, reason)
 		if reason == cachedb.Deleted {
 			return //定期保存的时候自然会过滤掉已删除的key
 		}
-
-		err := watchKeyMgr.Write(key, 0, false, func(keyVersion uint32) error {
-			//如果未保存则保存
-			_, ok := proxy.noSaveMap.Get(key)
-			if !ok {
-				return nil
-			}
-			proxy.noSaveMap.Remove(key)
-			return proxy.DB.Update(func(txn *badger.Txn) error {
-				fmt.Printf("warning save by remove key[%s] reason[%d]\n", key, reason)
-				return txn.Set([]byte(key), entry)
-			})
-		})
-		if err != nil {
-			log.Panic(err)
+		//如果未保存则保存
+		_, ok := proxy.noSaveMap.Get(key)
+		if !ok {
+			return
 		}
+		proxy.noSaveMap.Remove(key)
+		_ = proxy.DB.Update(func(txn *badger.Txn) error {
+			fmt.Printf("warning save by remove key[%s] reason[%d]\n", key, reason)
+			return txn.Set([]byte(key), entry)
+		})
 	})
 
 	if err != nil {
@@ -111,12 +105,13 @@ func CreateDBProxy(c *controlEXE.ControlEXE, dbDir string) (*DBProxy, error) {
 			}
 
 			wb := proxy.DB.NewWriteBatch()
+			defer wb.Cancel()
 			now := time.Now()
 			startTm := now
 			toSave := proxy.noSaveMap.Items()
 			snapshotMs := time.Since(now).Milliseconds()
 			now = time.Now()
-			for key, _ := range toSave {
+			for key := range toSave {
 				proxy.noSaveMap.Remove(key)
 				v, err = cache.Get(key)
 				if err != nil {
@@ -134,7 +129,6 @@ func CreateDBProxy(c *controlEXE.ControlEXE, dbDir string) (*DBProxy, error) {
 			if err = wb.Flush(); err != nil {
 				panic(err)
 			}
-			wb.Cancel()
 			fmt.Printf(">save key size[%d] snapshot[%d ms] range[%d ms] Flush[%d ms] total[%d ms]\n", len(toSave), snapshotMs, rangeMs, time.Since(now).Milliseconds(), time.Since(startTm).Milliseconds())
 		}
 		for {
@@ -154,12 +148,9 @@ func CreateDBProxy(c *controlEXE.ControlEXE, dbDir string) (*DBProxy, error) {
 
 	return proxy, nil
 }
-func (proxy *DBProxy) Close() {
+func (proxy *DBProxy) Close() error {
 	log.Println("main() exit!!!")
-	err := proxy.DB.Close()
-	if err != nil {
-		panic(err)
-	}
+	return proxy.DB.Close()
 }
 func (proxy *DBProxy) GetDBDir() string {
 	return proxy.dbDir
