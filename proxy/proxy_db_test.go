@@ -1,4 +1,4 @@
-package main
+package proxy
 
 import (
 	"context"
@@ -67,7 +67,7 @@ func TestReadDB(t *testing.T) {
 		require.Equal(t, uint32(1), version)
 		for _, kv := range kvList {
 			//t.Logf("[%d] %+v\n", i, kv)
-			require.Equal(t, cachedb.ErrEntryNotFound, kv.err)
+			require.Equal(t, cachedb.ErrEntryNotFound, kv.Err)
 		}
 
 		entryList := [][]byte{[]byte("v1")}
@@ -78,7 +78,7 @@ func TestReadDB(t *testing.T) {
 		require.Equal(t, 1, len(kvList))
 		require.Equal(t, uint32(2), version)
 		for i, kv := range kvList {
-			require.Equal(t, nil, kv.err)
+			require.Equal(t, nil, kv.Err)
 			t.Logf("[%d] %+v\n", i, kv)
 		}
 
@@ -115,8 +115,8 @@ func TestReadDB(t *testing.T) {
 		require.Equal(t, uint32(1), version)
 		for _, kv := range kvList {
 			//t.Logf("[%d] %+v\n", i, kv)
-			require.Equal(t, nil, kv.err)
-			require.Equal(t, []byte("v2"), kv.v)
+			require.Equal(t, nil, kv.Err)
+			require.Equal(t, []byte("v2"), kv.V)
 		}
 
 		c.CTXCancel() //触发退出信号
@@ -166,7 +166,7 @@ func TestSave(t *testing.T) {
 		panic("len(items) != len(keyList)")
 	}
 	for _, item := range items {
-		if item.err != nil {
+		if item.Err != nil {
 			require.NoError(t, err)
 		}
 	}

@@ -1,8 +1,6 @@
 package main
 
 import (
-	"container/list"
-	"errors"
 	"fmt"
 	badger "github.com/dgraph-io/badger/v3"
 	cmap "github.com/orcaman/concurrent-map"
@@ -13,15 +11,15 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strconv"
-	"sync"
 	"sync/atomic"
 	"syscall"
+	"test_badger/badgerApi"
 	"test_badger/controlEXE"
+	"test_badger/proxy"
 	"test_badger/rateLimiter"
+	"test_badger/web"
 	"time"
-	"unsafe"
 )
 
 type Collect struct {
@@ -36,32 +34,6 @@ type Collect struct {
 
 var dataLen int
 
-func StringToByteSlice(s string) []byte {
-	tmp1 := (*[2]uintptr)(unsafe.Pointer(&s))
-	tmp2 := [3]uintptr{tmp1[0], tmp1[1], tmp1[1]}
-	return *(*[]byte)(unsafe.Pointer(&tmp2))
-}
-
-func GetDirSize(path string) (int64, error) {
-	var size int64
-	err := filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
-		if err != nil {
-			if os.IsNotExist(err) {
-				return nil
-			}
-			return err
-		}
-		if !info.IsDir() {
-			size += info.Size()
-		}
-		return err
-	})
-	return size >> 20, err
-}
-
-func ByteSliceToString(bytes []byte) string {
-	return *(*string)(unsafe.Pointer(&bytes))
-}
 func noUse(val []byte) {
 }
 func fnBatchUpdate(db *badger.DB, info *Collect, id int) error {
@@ -186,7 +158,7 @@ func fnBatchRead(db *badger.DB, info *Collect, id int) error {
 	info.setCount++
 	return nil
 }
-func fnBatchUpdate2(db *DBProxy, info *Collect, id int) error {
+func fnBatchUpdate2(db *proxy.DBProxy, info *Collect, id int) error {
 	data := func(l int) []byte {
 		m := make([]byte, l)
 		_, err := rand.Read(m)
@@ -197,19 +169,22 @@ func fnBatchUpdate2(db *DBProxy, info *Collect, id int) error {
 	}
 	insertData := data(dataLen)
 
-	var keyList []string
-	keyList = append(keyList, "Role_"+strconv.Itoa(10000000+id))
-	keyList = append(keyList, "Item_"+strconv.Itoa(10000000+id))
-	keyList = append(keyList, "Build_"+strconv.Itoa(10000000+id))
-	keyList = append(keyList, "Home_"+strconv.Itoa(10000000+id))
-	keyList = append(keyList, "Map_"+strconv.Itoa(10000000+id))
+	keyList := append([]string(nil),
+		"Role_"+strconv.Itoa(10000000+id),
+		"Item_"+strconv.Itoa(10000000+id),
+		"Build_"+strconv.Itoa(10000000+id),
+		"Home_"+strconv.Itoa(10000000+id),
+		"Map_"+strconv.Itoa(10000000+id),
+	)
 
-	var valueList [][]byte
-	valueList = append(valueList, insertData)
-	valueList = append(valueList, insertData)
-	valueList = append(valueList, insertData)
-	valueList = append(valueList, insertData)
-	valueList = append(valueList, insertData)
+	valueList := append([][]byte(nil),
+		insertData,
+		insertData,
+		insertData,
+		insertData,
+		insertData,
+	)
+
 	beginTm := time.Now()
 
 	watchKey := "Watch_" + strconv.Itoa(10000000+id)
@@ -241,14 +216,15 @@ func fnBatchUpdate2(db *DBProxy, info *Collect, id int) error {
 	info.setCount++
 	return nil
 }
+func fnBatchRead2(db *proxy.DBProxy, info *Collect, id int) error {
+	keyList := append([]string(nil),
+		"Role_"+strconv.Itoa(10000000+id),
+		"Item_"+strconv.Itoa(10000000+id),
+		"Build_"+strconv.Itoa(10000000+id),
+		"Home_"+strconv.Itoa(10000000+id),
+		"Map_"+strconv.Itoa(10000000+id),
+	)
 
-func fnBatchRead2(db *DBProxy, info *Collect, id int) error {
-	var keyList []string
-	keyList = append(keyList, "Role_"+strconv.Itoa(10000000+id))
-	keyList = append(keyList, "Item_"+strconv.Itoa(10000000+id))
-	keyList = append(keyList, "Build_"+strconv.Itoa(10000000+id))
-	keyList = append(keyList, "Home_"+strconv.Itoa(10000000+id))
-	keyList = append(keyList, "Map_"+strconv.Itoa(10000000+id))
 	watchKey := "Watch_" + strconv.Itoa(10000000+id)
 	beginTm := time.Now()
 
@@ -257,8 +233,8 @@ func fnBatchRead2(db *DBProxy, info *Collect, id int) error {
 		panic("len(items) != len(keyList)")
 	}
 	for _, item := range items {
-		if item.err != nil {
-			panic(item.err)
+		if item.Err != nil {
+			panic(item.Err)
 		}
 	}
 	diffMS := time.Since(beginTm).Milliseconds()
@@ -284,105 +260,6 @@ func fnBatchRead2(db *DBProxy, info *Collect, id int) error {
 	}
 	info.setCount++
 	return nil
-}
-func Print(db *badger.DB) {
-	txn := db.NewTransaction(false)
-	defer txn.Discard()
-	itr := txn.NewIterator(badger.DefaultIteratorOptions)
-	defer itr.Close()
-	count := 0
-	for itr.Rewind(); itr.Valid(); itr.Next() {
-		count++
-		k := itr.Item().Key()
-		v, err := itr.Item().ValueCopy(nil)
-		if err != nil {
-			panic(err)
-		}
-		log.Printf("%s: v_len[%d]\n", string(k), len(v))
-	}
-	log.Printf("all keys: %d\n", count)
-}
-func GetDBCount(db *badger.DB) uint64 {
-	txn := db.NewTransaction(false)
-	defer txn.Discard()
-	opt := badger.DefaultIteratorOptions
-	opt.PrefetchValues = false
-	itr := txn.NewIterator(opt)
-	defer itr.Close()
-	count := uint64(0)
-	for itr.Rewind(); itr.Valid(); itr.Next() {
-		count++
-	}
-	return count
-}
-func GetPreDBCount(db *badger.DB, prefix string) uint64 {
-	txn := db.NewTransaction(false)
-	defer txn.Discard()
-	opt := badger.DefaultIteratorOptions
-	opt.PrefetchValues = false
-	opt.Prefix = []byte(prefix)
-	itr := txn.NewIterator(opt)
-	defer itr.Close()
-	count := uint64(0)
-	for itr.Rewind(); itr.Valid(); itr.Next() {
-		count++
-	}
-	return count
-}
-func PrintV(db *badger.DB) {
-	txn := db.NewTransaction(false)
-	defer txn.Discard()
-	itr := txn.NewIterator(badger.DefaultIteratorOptions)
-	defer itr.Close()
-	count := 0
-	for itr.Rewind(); itr.Valid(); itr.Next() {
-		count++
-		k := itr.Item().Key()
-		v, err := itr.Item().ValueCopy(nil)
-		if err != nil {
-			panic(err)
-		}
-		log.Printf("[%d] [version: %d]> %s: %s UserMeta[%d]\n", count, itr.Item().Version(), string(k), string(v), itr.Item().UserMeta())
-	}
-}
-
-type RateLimiter struct {
-	limit        int
-	interval     time.Duration
-	times        list.List
-	forceDisable bool
-}
-
-// shouldRateLimit saves the now as time taken or returns an error if
-// in the limit of rate limiting
-func (r *RateLimiter) shouldRateLimit(now time.Time) bool {
-	if r.times.Len() < r.limit {
-		r.times.PushBack(now)
-		return false
-	}
-
-	front := r.times.Front()
-	if diff := now.Sub(front.Value.(time.Time)); diff < r.interval {
-		return true
-	}
-
-	front.Value = now
-	r.times.MoveToBack(front)
-	return false
-}
-func (r *RateLimiter) RateWait() {
-	if r.forceDisable {
-		return
-	}
-	for {
-		now := time.Now()
-		if r.shouldRateLimit(now) {
-			time.Sleep(time.Millisecond)
-			//runtime.Gosched()
-			continue
-		}
-		break
-	}
 }
 
 func main() {
@@ -422,51 +299,46 @@ func main() {
 
 	dataLen = *dataSize
 
-	// Open the Badger database located in the /tmp/badger directory.
-	// It will be created if it doesn't exist.
 	openTm := time.Now()
 	dir := "./data"
-	opt := badger.DefaultOptions(dir).
-		WithCompactL0OnClose(true).      //退出处理LO压缩
-		WithDetectConflicts(false).      //禁用版本冲突(由业务层保障)
-		WithBlockCacheSize(2 << 30).     //如果加密和压缩开启时，需要开启，否则关闭
-		WithValueThreshold(*lsmMaxValue) // 小值放LSM树，默认1MB，  游戏业务或许用2KB 会比较好？
-	db, err := badger.Open(opt)
+	db, err := badger.Open(badgerApi.DefaultOptions(dir))
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer func() {
 		log.Println("main() exit!!!")
-		db.Close()
+		err := db.Close()
+		if err != nil {
+			panic(err)
+		}
 	}()
 
-	originalDirSize, err := GetDirSize(dir)
-	if err != nil {
-		panic(err)
-	}
-	log.Printf("openTm[%d ms] dataLen[%d], lsmMaxValue[%d] originalDirSize[%d MB]\n", time.Since(openTm).Milliseconds(), dataLen, *lsmMaxValue, originalDirSize)
+	log.Printf("openTm[%d ms] dataLen[%d], lsmMaxValue[%d]\n", time.Since(openTm).Milliseconds(), dataLen, *lsmMaxValue)
 
 	if err != nil {
 		panic(err)
 	}
-	proxyDB, err := CreateDBProxy(db, controlEXE.CreateControlEXE())
+	proxyDB, err := proxy.CreateDBProxy(db, controlEXE.CreateControlEXE())
 	if err != nil {
 		panic(err)
 	}
+
+	//开启网页查询
+	go web.RunWeb("0.0.0.0:4000", proxyDB)
+
 	chId := make(chan int, 1024*20)
-
 	goSendCnt := *coroutines
 	totalSendCnt := int64(0)
 	isClose := false
 
 	for i := 0; i < goSendCnt; i++ {
-		proxyDB.c.ProducerAdd(1)
+		proxyDB.C.ProducerAdd(1)
 		go func(sendId int) {
 			chClose := make(chan struct{})
 
 			defer func() {
 				close(chClose)
-				proxyDB.c.ProducerDone()
+				proxyDB.C.ProducerDone()
 			}()
 
 			var updateInfo Collect
@@ -566,7 +438,7 @@ func main() {
 			for id := curBeginId; id < curBeginId+onlineNum; id++ {
 				if isClose {
 					log.Println("检测到提前停止, 结束发送")
-					proxyDB.c.CTXCancel()
+					proxyDB.C.CTXCancel()
 					return
 				}
 				chId <- id //放入执行队列
@@ -583,7 +455,7 @@ func main() {
 			//是否全部执行完毕
 			if curStepCnt >= limitStepCnt {
 				log.Printf("全部执行完毕! curStepCnt[%d] >= limitStepCnt[%d]\n", curStepCnt, limitStepCnt)
-				proxyDB.c.CTXCancel()
+				proxyDB.C.CTXCancel()
 				return
 			}
 			curStepCnt++
@@ -600,12 +472,12 @@ func main() {
 			log.Printf("begin insert num[%d]\n", *kInsertNum)
 			for i := 0; i < *kInsertNum; i++ {
 				if isClose {
-					proxyDB.c.CTXCancel()
+					proxyDB.C.CTXCancel()
 					return
 				}
 				chId <- i
 			}
-			proxyDB.c.CTXCancel()
+			proxyDB.C.CTXCancel()
 		}()
 	case "get-set":
 		go sendFn()
@@ -618,122 +490,19 @@ func main() {
 		return
 	}
 
-	var gcMaxMs int64
-	var gcMaxMB int64
-	var gcRunOKCnt int64
-	proxyDB.c.AllAdd(1)
-	go func() {
-		defer proxyDB.c.AllDone()
-
-		gcRate := *kGcRate
-		log.Printf("Start GC Rate[%0.6f]\n", gcRate)
-		gcTicker := time.NewTicker(time.Second * 10)
-
-		runGC := func() (int64, error) {
-			if db.IsClosed() {
-				return 0, errors.New("find db.IsClosed() When GC")
-			}
-			beforeTm := time.Now()
-			beforeSize, err := GetDirSize(dir)
-			if err != nil {
-				panic(err)
-			}
-
-			for {
-				if db.IsClosed() {
-					return 0, errors.New("find db.IsClosed() When GC")
-				}
-				if err := db.RunValueLogGC(gcRate); err != nil {
-					if err == badger.ErrNoRewrite || err == badger.ErrRejected {
-						break
-					}
-
-					log.Println("Err GC: ", err)
-				} else {
-					gcRunOKCnt++
-				}
-			}
-			afterSize, err := GetDirSize(dir)
-			if err != nil {
-				return 0, err
-			}
-			diffGcMB := beforeSize - afterSize
-			diffGcTm := time.Since(beforeTm)
-			if gcMaxMs < diffGcTm.Milliseconds() {
-				gcMaxMs = diffGcTm.Milliseconds()
-			}
-			if gcMaxMB < diffGcMB {
-				gcMaxMB = diffGcMB
-			}
-			if diffGcMB != 0 {
-				log.Printf("GC>[cost %s] size[%d MB]->[%d MB] diff[%d MB]\n", diffGcTm.String(), beforeSize, afterSize, diffGcMB)
-			}
-			return diffGcMB, nil
-		}
-
-		for {
-			select {
-			case <-proxyDB.c.CTXDone():
-				afterSize, err := GetDirSize(dir)
-				if err != nil {
-					panic(err)
-				}
-				fmt.Printf("Close Before DirSize[%d MB] originalDirSize[%d MB] diffMB[%d MB]\n", afterSize, originalDirSize, afterSize-originalDirSize)
-				//立即触发一次GC
-				_, err = runGC()
-				if err != nil {
-					log.Println(err)
-				}
-
-				wgGCExit := sync.WaitGroup{}
-				wgGCExit.Add(1)
-				exitGCChan := make(chan struct{})
-				go func() {
-					defer wgGCExit.Done()
-					exitGCTicker := time.NewTicker(time.Second)
-
-					for {
-						select {
-						case <-exitGCTicker.C:
-							_, err := runGC()
-							if err != nil {
-								log.Println(err)
-								return
-							}
-						case <-exitGCChan:
-							gcSize, err := runGC() //最后一次GC
-							if err != nil {
-								log.Println(err)
-							}
-							log.Println("Last gcSize: ", gcSize)
-							return
-						}
-					}
-				}()
-				proxyDB.c.ConsumerWait() //wait all data save
-				close(exitGCChan)
-				wgGCExit.Wait() //等待完全GC
-				return
-			case <-gcTicker.C:
-				_, err := runGC()
-				if err != nil {
-					log.Println(err)
-				}
-			}
-		}
-	}()
+	gcMaxMs, gcMaxMB, gcRunOKCnt := badgerApi.RunGC(proxyDB.C, *kGcRate, db, dir)
 	sg := make(chan os.Signal, 1)
 	go func() {
-		<-proxyDB.c.CTXDone()
-		proxyDB.c.ProducerWait()
+		<-proxyDB.C.CTXDone()
+		proxyDB.C.ProducerWait()
 		diffExeTm := time.Since(openTm)
 		log.Printf("EXE Tm[%s] totalSendCnt: %d, QPS: %0.3f --> %0.3f, gcMax[%d ms] gcMax[%d MB] gcRunOKCnt[%d]\n", diffExeTm.String(), totalSendCnt, float64(totalSendCnt)/diffExeTm.Seconds(), float64(totalSendCnt)/diffExeTm.Seconds()/2, gcMaxMs, gcMaxMB, gcRunOKCnt)
 
-		proxyDB.c.ConsumerWait()
+		proxyDB.C.ConsumerWait()
 		diffWG2Tm := time.Since(openTm)
 		log.Printf("WG2Wait All EXE Tm[%s]", diffWG2Tm.String())
 
-		proxyDB.c.AllWait()
+		proxyDB.C.AllWait()
 		diffWG3Tm := time.Since(openTm)
 		log.Printf("WG3Wait All EXE Tm[%s]", diffWG3Tm.String())
 
@@ -744,28 +513,28 @@ func main() {
 	select {
 	case <-sg:
 		fmt.Println("the app will shutdown.")
-		proxyDB.c.CTXCancel()
+		proxyDB.C.CTXCancel()
 		isClose = true
-		proxyDB.c.AllWait()
+		proxyDB.C.AllWait()
 	}
 
 	now := time.Now()
-	fmt.Printf("DBCount: %d, cost: %s\n", GetDBCount(db), time.Since(now).String())
+	fmt.Printf("DBCount: %d, cost: %s\n", badgerApi.GetDBCount(db), time.Since(now).String())
 
 	now = time.Now()
-	fmt.Printf("[%d] Role_ cost: %s\n", GetPreDBCount(db, "Role_"), time.Since(now).String())
+	fmt.Printf("[%d] Role_ cost: %s\n", badgerApi.GetPreDBCount(db, "Role_"), time.Since(now).String())
 
 	now = time.Now()
-	fmt.Printf("[%d] Item_ cost: %s\n", GetPreDBCount(db, "Item_"), time.Since(now).String())
+	fmt.Printf("[%d] Item_ cost: %s\n", badgerApi.GetPreDBCount(db, "Item_"), time.Since(now).String())
 
 	now = time.Now()
-	fmt.Printf("[%d] Build_ cost: %s\n", GetPreDBCount(db, "Build_"), time.Since(now).String())
+	fmt.Printf("[%d] Build_ cost: %s\n", badgerApi.GetPreDBCount(db, "Build_"), time.Since(now).String())
 
 	now = time.Now()
-	fmt.Printf("[%d] Home_ cost: %s\n", GetPreDBCount(db, "Home_"), time.Since(now).String())
+	fmt.Printf("[%d] Home_ cost: %s\n", badgerApi.GetPreDBCount(db, "Home_"), time.Since(now).String())
 
 	now = time.Now()
-	fmt.Printf("[%d] Map_ cost: %s\n", GetPreDBCount(db, "Map_"), time.Since(now).String())
+	fmt.Printf("[%d] Map_ cost: %s\n", badgerApi.GetPreDBCount(db, "Map_"), time.Since(now).String())
 
 	fmt.Printf("GetCachePenetrateCnt: %d\n", proxyDB.GetCachePenetrateCnt())
 }

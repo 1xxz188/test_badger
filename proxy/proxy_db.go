@@ -1,4 +1,4 @@
-package main
+package proxy
 
 import (
 	"errors"
@@ -14,20 +14,28 @@ import (
 )
 
 type DBProxy struct {
-	db                *badger.DB
-	cache             cachedb.Cache
-	c                 *controlEXE.ControlEXE
-	watchKeyMgr       *customWatchKey.WatchKeyMgr
-	noSaveMap         cmap.ConcurrentMap //待保存列表
-	cachePenetrateCnt uint32             //穿透缓存次数
+	C                 *controlEXE.ControlEXE      //协程生命周期控制器
+	Db                *badger.DB                  //底层数据
+	cache             cachedb.Cache               //缓存层
+	watchKeyMgr       *customWatchKey.WatchKeyMgr //用于缓存层数据一致性控制
+	noSaveMap         cmap.ConcurrentMap          //待保存列表
+	cachePenetrateCnt uint64                      //缓存穿透次数
+	_                 [56]byte                    //cpu cache
+	cacheCnt          uint64                      //缓存命中次数
+}
+
+type KV struct {
+	K   string
+	V   []byte
+	Err error
 }
 
 func CreateDBProxy(db *badger.DB, c *controlEXE.ControlEXE) (*DBProxy, error) {
 	if db == nil {
-		return nil, errors.New("CreateDBProxy db == nil")
+		return nil, errors.New("CreateDBProxy Db == nil")
 	}
 	if c == nil {
-		return nil, errors.New("CreateDBProxy c == nil")
+		return nil, errors.New("CreateDBProxy C == nil")
 	}
 
 	watchKeyMgr, err := customWatchKey.New(1024)
@@ -35,8 +43,8 @@ func CreateDBProxy(db *badger.DB, c *controlEXE.ControlEXE) (*DBProxy, error) {
 		return nil, err
 	}
 	proxy := &DBProxy{
-		db:          db,
-		c:           c,
+		Db:          db,
+		C:           c,
 		watchKeyMgr: watchKeyMgr,
 		noSaveMap:   cmap.New(),
 	}
@@ -47,7 +55,7 @@ func CreateDBProxy(db *badger.DB, c *controlEXE.ControlEXE) (*DBProxy, error) {
 		if reason == cachedb.Deleted {
 			return //定期保存的时候自然会过滤掉已删除的key
 		}
-		//TODO watchKey
+
 		err := watchKeyMgr.Write(key, 0, false, func(keyVersion uint32) error {
 			//如果未保存则保存
 			_, ok := proxy.noSaveMap.Get(key)
@@ -55,7 +63,7 @@ func CreateDBProxy(db *badger.DB, c *controlEXE.ControlEXE) (*DBProxy, error) {
 				return nil
 			}
 			proxy.noSaveMap.Remove(key)
-			return proxy.db.Update(func(txn *badger.Txn) error {
+			return proxy.Db.Update(func(txn *badger.Txn) error {
 				fmt.Printf("warning save by remove key[%s] reason[%d]\n", key, reason)
 				return txn.Set([]byte(key), entry)
 			})
@@ -85,7 +93,7 @@ func CreateDBProxy(db *badger.DB, c *controlEXE.ControlEXE) (*DBProxy, error) {
 				return
 			}
 
-			wb := proxy.db.NewWriteBatch()
+			wb := proxy.Db.NewWriteBatch()
 			now := time.Now()
 			startTm := now
 			toSave := proxy.noSaveMap.Items()
@@ -129,20 +137,30 @@ func CreateDBProxy(db *badger.DB, c *controlEXE.ControlEXE) (*DBProxy, error) {
 
 	return proxy, nil
 }
-func (proxy *DBProxy) GetCachePenetrateCnt() uint32 {
-	return atomic.LoadUint32(&proxy.cachePenetrateCnt)
+
+func (proxy *DBProxy) GetCachePenetrateCnt() uint64 {
+	return atomic.LoadUint64(&proxy.cachePenetrateCnt)
+}
+
+func (proxy *DBProxy) GetCacheCnt() uint64 {
+	return atomic.LoadUint64(&proxy.cacheCnt)
+}
+
+func (proxy *DBProxy) GetCachePenetrateRate() float64 {
+	return float64(proxy.GetCachePenetrateCnt() / proxy.GetCacheCnt())
 }
 
 func (proxy *DBProxy) get(txn *badger.Txn, key string) ([]byte, error) {
 	data, err := proxy.cache.Get(key)
 	if err == nil {
+		atomic.AddUint64(&proxy.cacheCnt, 1)
 		return data, nil //命中缓存返回数据
 	}
 	if err != cachedb.ErrEntryNotFound {
 		return nil, err
 	}
 
-	atomic.AddUint32(&proxy.cachePenetrateCnt, 1)
+	atomic.AddUint64(&proxy.cachePenetrateCnt, 1)
 
 	//穿透到badger
 	item, err := txn.Get([]byte(key))
@@ -165,29 +183,38 @@ func (proxy *DBProxy) get(txn *badger.Txn, key string) ([]byte, error) {
 	return v, nil
 }
 
-type KV struct {
-	k   string
-	v   []byte
-	err error
-}
-
 func (proxy *DBProxy) Gets(watchKey string, keys []string) (result []KV, version uint32) {
-	_ = proxy.watchKeyMgr.Read(watchKey, func(keyVersion uint32) error {
-		version = keyVersion
-		txn := proxy.db.NewTransaction(false)
+	if len(watchKey) != 0 {
+		_ = proxy.watchKeyMgr.Read(watchKey, func(keyVersion uint32) error {
+			version = keyVersion
+			txn := proxy.Db.NewTransaction(false)
+			defer txn.Discard()
+
+			for _, key := range keys {
+				item, err := proxy.get(txn, key)
+				result = append(result, KV{
+					K:   key,
+					V:   item,
+					Err: err,
+				})
+			}
+			return nil
+		})
+		return result, version
+	} else {
+		txn := proxy.Db.NewTransaction(false)
 		defer txn.Discard()
 
 		for _, key := range keys {
 			item, err := proxy.get(txn, key)
 			result = append(result, KV{
-				k:   key,
-				v:   item,
-				err: err,
+				K:   key,
+				V:   item,
+				Err: err,
 			})
 		}
-		return nil
-	})
-	return result, version
+		return result, 0
+	}
 }
 func (proxy *DBProxy) set(key string, entry []byte) error {
 	if err := proxy.cache.Set(key, entry); err != nil {
@@ -202,7 +229,17 @@ func (proxy *DBProxy) Sets(watchKey string, keys []string, entryList [][]byte) e
 	if len(keys) != len(entryList) {
 		return errors.New("len(keys) != len(entryList)")
 	}
-	return proxy.watchKeyMgr.Write(watchKey, 0, false, func(keyVersion uint32) error {
+	if len(watchKey) != 0 {
+		return proxy.watchKeyMgr.Write(watchKey, 0, false, func(keyVersion uint32) error {
+			for i := 0; i < len(keys); i++ {
+				err := proxy.set(keys[i], entryList[i])
+				if err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+	} else {
 		for i := 0; i < len(keys); i++ {
 			err := proxy.set(keys[i], entryList[i])
 			if err != nil {
@@ -210,7 +247,7 @@ func (proxy *DBProxy) Sets(watchKey string, keys []string, entryList [][]byte) e
 			}
 		}
 		return nil
-	})
+	}
 }
 
 func (proxy *DBProxy) SetsByVersion(watchKey string, keyVersion uint32, keys []string, entryList [][]byte) error {
