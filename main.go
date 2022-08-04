@@ -272,7 +272,7 @@ func main() {
 
 	//get-set or get
 	kOnlineNum := kingpin.Flag("onlineNum", "[get-set] online num").Default("10000").Int()
-	kStep := kingpin.Flag("step", "[get-set] step").Default("1000").Int()
+	kStepId := kingpin.Flag("stepId", "[get-set] id increase per round").Default("1000").Int()
 	kStayTm := kingpin.Flag("stayTm", "[get-set] stay time[ns, us, ms, s, m, h]").Default("1m30s").String()
 	kLimitStepCnt := kingpin.Flag("limitStepCnt", "[get-set] total limit step cnt").Default("5").Int()
 	kCurBeginId := kingpin.Flag("beginId", "[get-set] begin id").Default("10000").Int()
@@ -326,7 +326,7 @@ func main() {
 			panic("onlineNum <= 0")
 		}
 
-		step := *kStep
+		stepId := *kStepId
 		stayTm, err := time.ParseDuration(*kStayTm) //步长
 		if err != nil {
 			panic(err)
@@ -348,7 +348,7 @@ func main() {
 		}
 		r.times.Init()*/
 		r := rateLimiter.NewBucket(time.Millisecond, 500)
-		log.Printf("limitStepCnt[%d] onlineNum[%d], curBeginId[%d] step[%d] stayTm[%s], rate[%d qps]", limitStepCnt, onlineNum, curBeginId, step, stayTm.String(), int(time.Second/time.Millisecond)*(*kSendLimit))
+		log.Printf("limitStepCnt[%d] onlineNum[%d], curBeginId[%d] stepId[%d] stayTm[%s], rate[%d qps]", limitStepCnt, onlineNum, curBeginId, stepId, stayTm.String(), int(time.Second/time.Millisecond)*(*kSendLimit))
 
 		beginTm := time.Now()
 		r.Wait(1)
@@ -379,7 +379,7 @@ func main() {
 				return
 			}
 			curStepCnt++
-			curBeginId += step
+			curBeginId += stepId
 			beginTm = time.Now()
 			log.Printf("新一轮开始 curBeginId[%d] Step[%d/%d]\n", curBeginId, curStepCnt, limitStepCnt)
 		}

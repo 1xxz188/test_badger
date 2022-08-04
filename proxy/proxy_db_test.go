@@ -7,24 +7,11 @@ import (
 	"github.com/stretchr/testify/require"
 	"sync"
 	"sync/atomic"
-	"test_badger/badgerApi"
 	"test_badger/cachedb"
 	"test_badger/controlEXE"
 	"testing"
 	"time"
 )
-
-func TestPrint(t *testing.T) {
-	c := controlEXE.CreateControlEXE()
-	proxy, err := CreateDBProxy(c, "./data")
-	require.NoError(t, err)
-	defer func() {
-		err := proxy.Close()
-		require.NoError(t, err)
-	}()
-
-	badgerApi.Print(proxy.DB)
-}
 
 func TestReadDB(t *testing.T) {
 	fn1 := func() {

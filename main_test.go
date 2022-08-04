@@ -9,6 +9,8 @@ import (
 	"math/rand"
 	"os"
 	"test_badger/badgerApi"
+	"test_badger/controlEXE"
+	"test_badger/proxy"
 	"test_badger/util"
 	"testing"
 	"time"
@@ -25,14 +27,6 @@ func removeDir(dir string) {
 	if err := os.RemoveAll(dir); err != nil {
 		panic(err)
 	}
-}
-func TestPrint(t *testing.T) {
-	db, err := badger.Open(badger.DefaultOptions("./data"))
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer db.Close()
-	badgerApi.Print(db)
 }
 
 func TestInsert(t *testing.T) {
@@ -278,4 +272,16 @@ func TestDBCount(t *testing.T) {
 
 	now = time.Now()
 	fmt.Printf("[%d] Role_ cost: %s\n", badgerApi.GetPreDBCount(db, "Role_"), time.Since(now).String())
+}
+
+func TestPrint(t *testing.T) {
+	c := controlEXE.CreateControlEXE()
+	proxyDB, err := proxy.CreateDBProxy(c, "./data")
+	require.NoError(t, err)
+	defer func() {
+		err := proxyDB.Close()
+		require.NoError(t, err)
+	}()
+
+	badgerApi.Print(proxyDB.DB)
 }
