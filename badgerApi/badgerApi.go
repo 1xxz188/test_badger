@@ -40,14 +40,9 @@ type Config struct {
 	IgnoreInternalCost bool
 }*/
 import (
-	"errors"
 	"fmt"
 	"github.com/dgraph-io/badger/v3"
 	"log"
-	"sync"
-	"test_badger/controlEXE"
-	"test_badger/util"
-	"time"
 )
 
 type KV struct {
@@ -64,118 +59,6 @@ func DefaultOptions(path string) badger.Options {
 		WithDetectConflicts(false).  //禁用版本冲突(由业务层保障)
 		WithBlockCacheSize(2 << 30). //如果加密和压缩开启时，需要开启，否则关闭
 		WithValueThreshold(65)       //不需要太大,kv分离可以减少树大小,稳定读写性能，减少写放大，减少L0阻塞风险
-}
-
-func RunGC(c *controlEXE.ControlEXE, gcRate float64, db *badger.DB, dir string) (int64, int64, int64) {
-	var gcMaxMs int64
-	var gcMaxMB int64
-	var gcRunOKCnt int64
-	c.AllAdd(1)
-
-	go func() {
-		defer c.AllDone()
-
-		originalDirSize, err := util.GetDirSize(dir)
-		if err != nil {
-			panic(err)
-		}
-		log.Printf("Start GC Rate[%0.6f], originalDirSize[%d MB]\n", gcRate, originalDirSize)
-		gcTicker := time.NewTicker(time.Second * 10)
-
-		runGC := func() (int64, error) {
-			if db.IsClosed() {
-				return 0, errors.New("find db.IsClosed() When GC")
-			}
-			beforeTm := time.Now()
-			beforeSize, err := util.GetDirSize(dir)
-			if err != nil {
-				panic(err)
-			}
-
-			for {
-				if db.IsClosed() {
-					return 0, errors.New("find db.IsClosed() When GC")
-				}
-				if err := db.RunValueLogGC(gcRate); err != nil {
-					if err == badger.ErrNoRewrite || err == badger.ErrRejected {
-						break
-					}
-
-					log.Println("Err GC: ", err)
-				} else {
-					gcRunOKCnt++
-				}
-			}
-			afterSize, err := util.GetDirSize(dir)
-			if err != nil {
-				return 0, err
-			}
-			diffGcMB := beforeSize - afterSize
-			diffGcTm := time.Since(beforeTm)
-			if gcMaxMs < diffGcTm.Milliseconds() {
-				gcMaxMs = diffGcTm.Milliseconds()
-			}
-			if gcMaxMB < diffGcMB {
-				gcMaxMB = diffGcMB
-			}
-			if diffGcMB != 0 {
-				log.Printf("GC>[cost %s] size[%d MB]->[%d MB] diff[%d MB]\n", diffGcTm.String(), beforeSize, afterSize, diffGcMB)
-			}
-			return diffGcMB, nil
-		}
-
-		for {
-			select {
-			case <-c.CTXDone():
-				afterSize, err := util.GetDirSize(dir)
-				if err != nil {
-					panic(err)
-				}
-				fmt.Printf("Close Before DirSize[%d MB] originalDirSize[%d MB] diffMB[%d MB]\n", afterSize, originalDirSize, afterSize-originalDirSize)
-				//立即触发一次GC
-				_, err = runGC()
-				if err != nil {
-					log.Println(err)
-				}
-
-				wgGCExit := sync.WaitGroup{}
-				wgGCExit.Add(1)
-				exitGCChan := make(chan struct{})
-				go func() {
-					defer wgGCExit.Done()
-					exitGCTicker := time.NewTicker(time.Second)
-
-					for {
-						select {
-						case <-exitGCTicker.C:
-							_, err := runGC()
-							if err != nil {
-								log.Println(err)
-								return
-							}
-						case <-exitGCChan:
-							gcSize, err := runGC() //最后一次GC
-							if err != nil {
-								log.Println(err)
-							}
-							log.Println("Last gcSize: ", gcSize)
-							return
-						}
-					}
-				}()
-				c.ConsumerWait() //wait all data save
-				close(exitGCChan)
-				wgGCExit.Wait() //等待完全GC
-				return
-			case <-gcTicker.C:
-				_, err := runGC()
-				if err != nil {
-					log.Println(err)
-				}
-			}
-		}
-	}()
-	return gcMaxMs, gcMaxMB, gcRunOKCnt
 }
 
 func GetDBCount(db *badger.DB) uint64 {
@@ -205,7 +88,6 @@ func GetPreDBCount(db *badger.DB, prefix string) uint64 {
 	}
 	return count
 }
-
 func GetValue(db *badger.DB, key string) ([]byte, error) {
 	txn := db.NewTransaction(false)
 	defer txn.Discard()
@@ -252,7 +134,6 @@ func GetRange(db *badger.DB, begin int, end int) (result []KV) {
 	}
 	return result
 }
-
 func Print(db *badger.DB) {
 	txn := db.NewTransaction(false)
 	defer txn.Discard()

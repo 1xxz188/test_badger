@@ -1,6 +1,7 @@
 package util
 
 import (
+	"math/rand"
 	"os"
 	"path/filepath"
 	"unsafe"
@@ -36,4 +37,13 @@ func StringToByteSlice(s string) []byte {
 
 func ByteSliceToString(bytes []byte) string {
 	return *(*string)(unsafe.Pointer(&bytes))
+}
+
+func RandData(l int) []byte {
+	m := make([]byte, l)
+	_, err := rand.Read(m)
+	if err != nil {
+		panic(err)
+	}
+	return m
 }

@@ -8,6 +8,8 @@ import (
 	"log"
 	"math/rand"
 	"os"
+	"test_badger/badgerApi"
+	"test_badger/util"
 	"testing"
 	"time"
 )
@@ -30,7 +32,7 @@ func TestPrint(t *testing.T) {
 		log.Fatal(err)
 	}
 	defer db.Close()
-	Print(db)
+	badgerApi.Print(db)
 }
 
 func TestInsert(t *testing.T) {
@@ -105,7 +107,7 @@ func TestInsertVlog(t *testing.T) {
 
 	require.NoError(t, err)
 
-	size, err := GetDirSize(dir)
+	size, err := util.GetDirSize(dir)
 	require.NoError(t, err)
 	log.Printf("Before run GC DB Size = %dMB\n", size)
 
@@ -125,7 +127,7 @@ func TestInsertVlog(t *testing.T) {
 			continue
 		}
 	}
-	afterSize, err := GetDirSize(dir)
+	afterSize, err := util.GetDirSize(dir)
 	require.NoError(t, err)
 	log.Printf("GC>[cost %s] successfulCnt[%d] db_size[%d MB] GC[%d MB]\n", time.Since(beforeTm).String(), successfulCnt, size, size-afterSize)
 }
@@ -221,7 +223,7 @@ func TestBackup(t *testing.T) {
 		return nil
 	})
 	require.NoError(t, err)
-	PrintV(db)
+	badgerApi.PrintV(db)
 
 	// Use different directory.
 	//dirBak, err := os.MkdirTemp("./", "badgerbak-test")
@@ -258,7 +260,7 @@ func TestBackup(t *testing.T) {
 	defer bakNew.Close()
 
 	require.NoError(t, db.Load(bakNew, 16))
-	PrintV(db)
+	badgerApi.PrintV(db)
 }
 
 func TestDBCount(t *testing.T) {
@@ -269,11 +271,11 @@ func TestDBCount(t *testing.T) {
 	defer db.Close()
 
 	now := time.Now()
-	fmt.Printf("DBCount: %d, cost: %s\n", GetDBCount(db), time.Since(now).String())
+	fmt.Printf("DBCount: %d, cost: %s\n", badgerApi.GetDBCount(db), time.Since(now).String())
 
 	now = time.Now()
-	fmt.Printf("[%d] Item_ cost: %s\n", GetPreDBCount(db, "Item_"), time.Since(now).String())
+	fmt.Printf("[%d] Item_ cost: %s\n", badgerApi.GetPreDBCount(db, "Item_"), time.Since(now).String())
 
 	now = time.Now()
-	fmt.Printf("[%d] Role_ cost: %s\n", GetPreDBCount(db, "Role_"), time.Since(now).String())
+	fmt.Printf("[%d] Role_ cost: %s\n", badgerApi.GetPreDBCount(db, "Role_"), time.Since(now).String())
 }

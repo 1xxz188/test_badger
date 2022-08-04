@@ -37,7 +37,6 @@ func RunWeb(listenAddr string, proxy *proxy.DBProxy) { //"0.0.0.0:4000"
 	app.Get("/get/:key", getKey())                    //通过缓存读取
 	app.Get("/getDB/:key", getDBKey())                //直接拉取底层badger数据
 	app.Get("/getDB-range/:begin-:end", getDBRange()) //直接拉取底层badger数据
-
 	app.Get("/metrics", getMetrics)
 
 	launchError := app.Listen(listenAddr)
@@ -57,7 +56,7 @@ func getDBKey() func(c *fiber.Ctx) error {
 		if key == "" {
 			return c.SendString(GetErr("key parameter illegal"))
 		}
-		v, err := badgerApi.GetValue(thisProxy.Db, key)
+		v, err := badgerApi.GetValue(thisProxy.DB, key)
 		if err != nil {
 			return c.SendString(GetErr(err.Error()))
 		}
@@ -112,7 +111,7 @@ func getDBRange() func(c *fiber.Ctx) error {
 
 		now := time.Now()
 		var result string
-		kvList := badgerApi.GetRange(thisProxy.Db, begin, end)
+		kvList := badgerApi.GetRange(thisProxy.DB, begin, end)
 		for i, kv := range kvList {
 			result += fmt.Sprintf("[%d] [version: %d]> %s: %s UserMeta[%d] expires_at[%d]\n", i+1, kv.Version, kv.K, util.ByteSliceToString(kv.V), kv.UserMeta, kv.ExpiresAt)
 		}
@@ -145,8 +144,8 @@ func getMetrics(c *fiber.Ctx) error {
 		result += fmt.Sprintf("%s metrics: %s\n", name, metrics)
 	}
 
-	analyze("Block cache", thisProxy.Db.BlockCacheMetrics())
-	analyze("Index cache", thisProxy.Db.IndexCacheMetrics())
+	analyze("Block cache", thisProxy.DB.BlockCacheMetrics())
+	analyze("Index cache", thisProxy.DB.IndexCacheMetrics())
 
 	result += "Cache Cnt: " + strconv.FormatUint(thisProxy.GetCacheCnt(), 10)
 	result += "\nCache Penetrate Cnt: " + strconv.FormatUint(thisProxy.GetCachePenetrateCnt(), 10)

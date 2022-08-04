@@ -18,6 +18,7 @@ import (
 	"test_badger/controlEXE"
 	"test_badger/proxy"
 	"test_badger/rateLimiter"
+	"test_badger/util"
 	"test_badger/web"
 	"time"
 )
@@ -34,8 +35,6 @@ type Collect struct {
 
 var dataLen int
 
-func noUse(val []byte) {
-}
 func fnBatchUpdate(db *badger.DB, info *Collect, id int) error {
 	wb := db.NewWriteBatch()
 	defer wb.Cancel()
@@ -133,6 +132,9 @@ func fnBatchRead(db *badger.DB, info *Collect, id int) error {
 	if err != nil {
 		return err
 	}
+
+	noUse := func(val []byte) {
+	}
 	noUse(val)
 	diffMS := time.Since(beginTm).Milliseconds()
 	diffMic := time.Since(beginTm).Microseconds()
@@ -159,15 +161,7 @@ func fnBatchRead(db *badger.DB, info *Collect, id int) error {
 	return nil
 }
 func fnBatchUpdate2(db *proxy.DBProxy, info *Collect, id int) error {
-	data := func(l int) []byte {
-		m := make([]byte, l)
-		_, err := rand.Read(m)
-		if err != nil {
-			panic(err)
-		}
-		return m
-	}
-	insertData := data(dataLen)
+	insertData := util.RandData(dataLen)
 
 	keyList := append([]string(nil),
 		"Role_"+strconv.Itoa(10000000+id),
@@ -300,105 +294,27 @@ func main() {
 	dataLen = *dataSize
 
 	openTm := time.Now()
-	dir := "./data"
-	db, err := badger.Open(badgerApi.DefaultOptions(dir))
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer func() {
-		log.Println("main() exit!!!")
-		err := db.Close()
-		if err != nil {
-			panic(err)
-		}
-	}()
-
 	log.Printf("openTm[%d ms] dataLen[%d], lsmMaxValue[%d]\n", time.Since(openTm).Milliseconds(), dataLen, *lsmMaxValue)
 
+	proxyDB, err := proxy.CreateDBProxy(controlEXE.CreateControlEXE(), "./data")
 	if err != nil {
 		panic(err)
 	}
-	proxyDB, err := proxy.CreateDBProxy(db, controlEXE.CreateControlEXE())
-	if err != nil {
-		panic(err)
-	}
+	defer proxyDB.Close()
 
+	//开启GC
+	go proxyDB.RunGC(*kGcRate)
 	//开启网页查询
 	go web.RunWeb("0.0.0.0:4000", proxyDB)
 
 	chId := make(chan int, 1024*20)
-	goSendCnt := *coroutines
 	totalSendCnt := int64(0)
 	isClose := false
 
-	for i := 0; i < goSendCnt; i++ {
-		proxyDB.C.ProducerAdd(1)
-		go func(sendId int) {
-			chClose := make(chan struct{})
+	//消费协程
+	work(proxyDB, *coroutines, *op, chId, &totalSendCnt)
 
-			defer func() {
-				close(chClose)
-				proxyDB.C.ProducerDone()
-			}()
-
-			var updateInfo Collect
-			var getInfo Collect
-			go func() {
-				ticker := time.NewTicker(time.Second * 10)
-				for { //循环
-					select {
-					case <-ticker.C:
-						if updateInfo.setCount > 0 {
-							log.Printf("[%d]updateInfo> sendCnt[%d] avg[%d us] max[%d ms] >=10ms[%d] >=100ms[%d] >=300ms[%d] >=1000ms[%d]\n",
-								sendId, updateInfo.setCount, updateInfo.totalMic/updateInfo.setCount, updateInfo.maxMs, updateInfo.bigger10MsCount, updateInfo.bigger100MsCount, updateInfo.bigger300MsCount, updateInfo.bigger1SecCount)
-						}
-
-						if getInfo.setCount > 0 {
-							log.Printf("[%d]getInfo> sendCnt[%d] avg[%d us] max[%d ms] >=10ms[%d] >=100ms[%d] >=300ms[%d] >=1000ms[%d]\n",
-								sendId, getInfo.setCount, getInfo.totalMic/getInfo.setCount, getInfo.maxMs, getInfo.bigger10MsCount, getInfo.bigger100MsCount, getInfo.bigger300MsCount, getInfo.bigger1SecCount)
-						}
-					case <-chClose:
-						return
-					}
-				}
-			}()
-
-			if *op == "insert" || *op == "set" {
-				for id := range chId {
-					if err := fnBatchUpdate2(proxyDB, &updateInfo, id); err != nil {
-						panic(err)
-					}
-				}
-			} else if *op == "get" {
-				for id := range chId {
-					if err := fnBatchRead2(proxyDB, &getInfo, id); err != nil {
-						panic(err)
-					}
-				}
-			} else {
-				for id := range chId {
-					if err := fnBatchRead2(proxyDB, &getInfo, id); err != nil {
-						panic(err)
-					}
-					if err := fnBatchUpdate2(proxyDB, &updateInfo, id); err != nil {
-						panic(err)
-					}
-				}
-			}
-
-			if updateInfo.setCount > 0 {
-				log.Printf("[%d]updateInfo> over sendCnt[%d] avg[%d us] max[%d ms] >=10ms[%d] >=100ms[%d] >=300ms[%d] >=1000ms[%d]\n",
-					sendId, updateInfo.setCount, updateInfo.totalMic/updateInfo.setCount, updateInfo.maxMs, updateInfo.bigger10MsCount, updateInfo.bigger100MsCount, updateInfo.bigger300MsCount, updateInfo.bigger1SecCount)
-			}
-			if getInfo.setCount > 0 {
-				log.Printf("[%d]getInfo> over sendCnt[%d] avg[%d us] max[%d ms] >=10ms[%d] >=100ms[%d] >=300ms[%d] >=1000ms[%d]\n",
-					sendId, getInfo.setCount, getInfo.totalMic/getInfo.setCount, getInfo.maxMs, getInfo.bigger10MsCount, getInfo.bigger100MsCount, getInfo.bigger300MsCount, getInfo.bigger1SecCount)
-			}
-			atomic.AddInt64(&totalSendCnt, updateInfo.setCount)
-			atomic.AddInt64(&totalSendCnt, getInfo.setCount)
-		}(i)
-	}
-
+	//生产协程
 	sendFn := func() {
 		defer close(chId)
 		onlineNum := *kOnlineNum //同时在线人数
@@ -490,13 +406,14 @@ func main() {
 		return
 	}
 
-	gcMaxMs, gcMaxMB, gcRunOKCnt := badgerApi.RunGC(proxyDB.C, *kGcRate, db, dir)
 	sg := make(chan os.Signal, 1)
+
+	chExitInfo := make(chan struct{})
 	go func() {
 		<-proxyDB.C.CTXDone()
 		proxyDB.C.ProducerWait()
 		diffExeTm := time.Since(openTm)
-		log.Printf("EXE Tm[%s] totalSendCnt: %d, QPS: %0.3f --> %0.3f, gcMax[%d ms] gcMax[%d MB] gcRunOKCnt[%d]\n", diffExeTm.String(), totalSendCnt, float64(totalSendCnt)/diffExeTm.Seconds(), float64(totalSendCnt)/diffExeTm.Seconds()/2, gcMaxMs, gcMaxMB, gcRunOKCnt)
+		log.Printf("EXE Tm[%s] totalSendCnt: %d, QPS: %0.3f --> %0.3f, gcMax[%d ms] gcMax[%d MB] gcRunOKCnt[%d]\n", diffExeTm.String(), totalSendCnt, float64(totalSendCnt)/diffExeTm.Seconds(), float64(totalSendCnt)/diffExeTm.Seconds()/2, proxyDB.GCInfo.GCMaxMs, proxyDB.GCInfo.GCMaxMB, proxyDB.GCInfo.GCRunOKCnt)
 
 		proxyDB.C.ConsumerWait()
 		diffWG2Tm := time.Since(openTm)
@@ -507,6 +424,7 @@ func main() {
 		log.Printf("WG3Wait All EXE Tm[%s]", diffWG3Tm.String())
 
 		sg <- syscall.SIGINT
+		close(chExitInfo)
 	}()
 
 	signal.Notify(sg, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGKILL, syscall.SIGTERM)
@@ -515,26 +433,97 @@ func main() {
 		fmt.Println("the app will shutdown.")
 		proxyDB.C.CTXCancel()
 		isClose = true
-		proxyDB.C.AllWait()
+		<-chExitInfo
 	}
 
 	now := time.Now()
-	fmt.Printf("DBCount: %d, cost: %s\n", badgerApi.GetDBCount(db), time.Since(now).String())
+	fmt.Printf("DBCount: %d, cost: %s\n", badgerApi.GetDBCount(proxyDB.DB), time.Since(now).String())
 
 	now = time.Now()
-	fmt.Printf("[%d] Role_ cost: %s\n", badgerApi.GetPreDBCount(db, "Role_"), time.Since(now).String())
+	fmt.Printf("[%d] Role_ cost: %s\n", badgerApi.GetPreDBCount(proxyDB.DB, "Role_"), time.Since(now).String())
 
 	now = time.Now()
-	fmt.Printf("[%d] Item_ cost: %s\n", badgerApi.GetPreDBCount(db, "Item_"), time.Since(now).String())
+	fmt.Printf("[%d] Item_ cost: %s\n", badgerApi.GetPreDBCount(proxyDB.DB, "Item_"), time.Since(now).String())
 
 	now = time.Now()
-	fmt.Printf("[%d] Build_ cost: %s\n", badgerApi.GetPreDBCount(db, "Build_"), time.Since(now).String())
+	fmt.Printf("[%d] Build_ cost: %s\n", badgerApi.GetPreDBCount(proxyDB.DB, "Build_"), time.Since(now).String())
 
 	now = time.Now()
-	fmt.Printf("[%d] Home_ cost: %s\n", badgerApi.GetPreDBCount(db, "Home_"), time.Since(now).String())
+	fmt.Printf("[%d] Home_ cost: %s\n", badgerApi.GetPreDBCount(proxyDB.DB, "Home_"), time.Since(now).String())
 
 	now = time.Now()
-	fmt.Printf("[%d] Map_ cost: %s\n", badgerApi.GetPreDBCount(db, "Map_"), time.Since(now).String())
+	fmt.Printf("[%d] Map_ cost: %s\n", badgerApi.GetPreDBCount(proxyDB.DB, "Map_"), time.Since(now).String())
 
 	fmt.Printf("GetCachePenetrateCnt: %d\n", proxyDB.GetCachePenetrateCnt())
+}
+
+//work 处理数据
+func work(proxyDB *proxy.DBProxy, coroutines int, op string, chId chan int, totalSendCnt *int64) {
+	for i := 0; i < coroutines; i++ {
+		proxyDB.C.ProducerAdd(1)
+		go func(sendId int) {
+			chClose := make(chan struct{})
+
+			defer func() {
+				close(chClose)
+				proxyDB.C.ProducerDone()
+			}()
+
+			var updateInfo Collect
+			var getInfo Collect
+			go func() {
+				ticker := time.NewTicker(time.Second * 10)
+				for { //循环
+					select {
+					case <-ticker.C:
+						if updateInfo.setCount > 0 {
+							log.Printf("[%d]updateInfo> sendCnt[%d] avg[%d us] max[%d ms] >=10ms[%d] >=100ms[%d] >=300ms[%d] >=1000ms[%d]\n",
+								sendId, updateInfo.setCount, updateInfo.totalMic/updateInfo.setCount, updateInfo.maxMs, updateInfo.bigger10MsCount, updateInfo.bigger100MsCount, updateInfo.bigger300MsCount, updateInfo.bigger1SecCount)
+						}
+
+						if getInfo.setCount > 0 {
+							log.Printf("[%d]getInfo> sendCnt[%d] avg[%d us] max[%d ms] >=10ms[%d] >=100ms[%d] >=300ms[%d] >=1000ms[%d]\n",
+								sendId, getInfo.setCount, getInfo.totalMic/getInfo.setCount, getInfo.maxMs, getInfo.bigger10MsCount, getInfo.bigger100MsCount, getInfo.bigger300MsCount, getInfo.bigger1SecCount)
+						}
+					case <-chClose:
+						return
+					}
+				}
+			}()
+
+			if op == "insert" || op == "set" {
+				for id := range chId {
+					if err := fnBatchUpdate2(proxyDB, &updateInfo, id); err != nil {
+						panic(err)
+					}
+				}
+			} else if op == "get" {
+				for id := range chId {
+					if err := fnBatchRead2(proxyDB, &getInfo, id); err != nil {
+						panic(err)
+					}
+				}
+			} else {
+				for id := range chId {
+					if err := fnBatchRead2(proxyDB, &getInfo, id); err != nil {
+						panic(err)
+					}
+					if err := fnBatchUpdate2(proxyDB, &updateInfo, id); err != nil {
+						panic(err)
+					}
+				}
+			}
+
+			if updateInfo.setCount > 0 {
+				log.Printf("[%d]updateInfo> over sendCnt[%d] avg[%d us] max[%d ms] >=10ms[%d] >=100ms[%d] >=300ms[%d] >=1000ms[%d]\n",
+					sendId, updateInfo.setCount, updateInfo.totalMic/updateInfo.setCount, updateInfo.maxMs, updateInfo.bigger10MsCount, updateInfo.bigger100MsCount, updateInfo.bigger300MsCount, updateInfo.bigger1SecCount)
+			}
+			if getInfo.setCount > 0 {
+				log.Printf("[%d]getInfo> over sendCnt[%d] avg[%d us] max[%d ms] >=10ms[%d] >=100ms[%d] >=300ms[%d] >=1000ms[%d]\n",
+					sendId, getInfo.setCount, getInfo.totalMic/getInfo.setCount, getInfo.maxMs, getInfo.bigger10MsCount, getInfo.bigger100MsCount, getInfo.bigger300MsCount, getInfo.bigger1SecCount)
+			}
+			atomic.AddInt64(totalSendCnt, updateInfo.setCount)
+			atomic.AddInt64(totalSendCnt, getInfo.setCount)
+		}(i)
+	}
 }

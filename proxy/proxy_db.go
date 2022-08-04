@@ -6,16 +6,27 @@ import (
 	"github.com/dgraph-io/badger/v3"
 	cmap "github.com/orcaman/concurrent-map"
 	"log"
+	"sync"
 	"sync/atomic"
+	"test_badger/badgerApi"
 	"test_badger/cachedb"
 	"test_badger/controlEXE"
 	"test_badger/customWatchKey"
+	"test_badger/util"
 	"time"
 )
 
+type GcInfo struct {
+	GCMaxMs    int64
+	GCMaxMB    int64
+	GCRunOKCnt int64
+}
+
 type DBProxy struct {
-	C                 *controlEXE.ControlEXE      //协程生命周期控制器
-	Db                *badger.DB                  //底层数据
+	C                 *controlEXE.ControlEXE //协程生命周期控制器
+	DB                *badger.DB             //底层数据
+	GCInfo            GcInfo
+	dbDir             string
 	cache             cachedb.Cache               //缓存层
 	watchKeyMgr       *customWatchKey.WatchKeyMgr //用于缓存层数据一致性控制
 	noSaveMap         cmap.ConcurrentMap          //待保存列表
@@ -30,9 +41,14 @@ type KV struct {
 	Err error
 }
 
-func CreateDBProxy(db *badger.DB, c *controlEXE.ControlEXE) (*DBProxy, error) {
+func CreateDBProxy(c *controlEXE.ControlEXE, dbDir string) (*DBProxy, error) {
+	db, err := badger.Open(badgerApi.DefaultOptions(dbDir))
+	if err != nil {
+		return nil, err
+	}
+
 	if db == nil {
-		return nil, errors.New("CreateDBProxy Db == nil")
+		return nil, errors.New("CreateDBProxy DB == nil")
 	}
 	if c == nil {
 		return nil, errors.New("CreateDBProxy C == nil")
@@ -43,8 +59,9 @@ func CreateDBProxy(db *badger.DB, c *controlEXE.ControlEXE) (*DBProxy, error) {
 		return nil, err
 	}
 	proxy := &DBProxy{
-		Db:          db,
+		DB:          db,
 		C:           c,
+		dbDir:       dbDir,
 		watchKeyMgr: watchKeyMgr,
 		noSaveMap:   cmap.New(),
 	}
@@ -63,7 +80,7 @@ func CreateDBProxy(db *badger.DB, c *controlEXE.ControlEXE) (*DBProxy, error) {
 				return nil
 			}
 			proxy.noSaveMap.Remove(key)
-			return proxy.Db.Update(func(txn *badger.Txn) error {
+			return proxy.DB.Update(func(txn *badger.Txn) error {
 				fmt.Printf("warning save by remove key[%s] reason[%d]\n", key, reason)
 				return txn.Set([]byte(key), entry)
 			})
@@ -93,7 +110,7 @@ func CreateDBProxy(db *badger.DB, c *controlEXE.ControlEXE) (*DBProxy, error) {
 				return
 			}
 
-			wb := proxy.Db.NewWriteBatch()
+			wb := proxy.DB.NewWriteBatch()
 			now := time.Now()
 			startTm := now
 			toSave := proxy.noSaveMap.Items()
@@ -136,6 +153,120 @@ func CreateDBProxy(db *badger.DB, c *controlEXE.ControlEXE) (*DBProxy, error) {
 	}()
 
 	return proxy, nil
+}
+func (proxy *DBProxy) Close() {
+	log.Println("main() exit!!!")
+	err := proxy.DB.Close()
+	if err != nil {
+		panic(err)
+	}
+}
+func (proxy *DBProxy) GetDBDir() string {
+	return proxy.dbDir
+}
+func (proxy *DBProxy) RunGC(gcRate float64) {
+	proxy.C.AllAdd(1)
+	defer proxy.C.AllDone()
+
+	originalDirSize, err := util.GetDirSize(proxy.dbDir)
+	if err != nil {
+		panic(err)
+	}
+	log.Printf("Start GC Rate[%0.6f], originalDirSize[%d MB]\n", gcRate, originalDirSize)
+	gcTicker := time.NewTicker(time.Second * 10)
+
+	runGC := func() (int64, error) {
+		if proxy.DB.IsClosed() {
+			return 0, errors.New("find db.IsClosed() When GC")
+		}
+		beforeTm := time.Now()
+		beforeSize, err := util.GetDirSize(proxy.dbDir)
+		if err != nil {
+			panic(err)
+		}
+
+		for {
+			if proxy.DB.IsClosed() {
+				return 0, errors.New("find db.IsClosed() When GC")
+			}
+			if err := proxy.DB.RunValueLogGC(gcRate); err != nil {
+				if err == badger.ErrNoRewrite || err == badger.ErrRejected {
+					break
+				}
+
+				log.Println("Err GC: ", err)
+			} else {
+				proxy.GCInfo.GCRunOKCnt++
+			}
+		}
+		afterSize, err := util.GetDirSize(proxy.dbDir)
+		if err != nil {
+			return 0, err
+		}
+		diffGcMB := beforeSize - afterSize
+		diffGcTm := time.Since(beforeTm)
+		if proxy.GCInfo.GCMaxMs < diffGcTm.Milliseconds() {
+			proxy.GCInfo.GCMaxMs = diffGcTm.Milliseconds()
+		}
+		if proxy.GCInfo.GCMaxMB < diffGcMB {
+			proxy.GCInfo.GCMaxMB = diffGcMB
+		}
+		if diffGcMB != 0 {
+			log.Printf("GC>[cost %s] size[%d MB]->[%d MB] diff[%d MB]\n", diffGcTm.String(), beforeSize, afterSize, diffGcMB)
+		}
+		return diffGcMB, nil
+	}
+
+	for {
+		select {
+		case <-proxy.C.CTXDone():
+			afterSize, err := util.GetDirSize(proxy.dbDir)
+			if err != nil {
+				panic(err)
+			}
+			fmt.Printf("Close Before DirSize[%d MB] originalDirSize[%d MB] diffMB[%d MB]\n", afterSize, originalDirSize, afterSize-originalDirSize)
+			//立即触发一次GC
+			_, err = runGC()
+			if err != nil {
+				log.Println(err)
+			}
+
+			wgGCExit := sync.WaitGroup{}
+			wgGCExit.Add(1)
+			exitGCChan := make(chan struct{})
+			go func() {
+				defer wgGCExit.Done()
+				exitGCTicker := time.NewTicker(time.Second)
+
+				for {
+					select {
+					case <-exitGCTicker.C:
+						_, err := runGC()
+						if err != nil {
+							log.Println(err)
+							return
+						}
+					case <-exitGCChan:
+						gcSize, err := runGC() //最后一次GC
+						if err != nil {
+							log.Println(err)
+						}
+						log.Println("Last gcSize: ", gcSize)
+						return
+					}
+				}
+			}()
+			proxy.C.ConsumerWait() //wait all data save
+			close(exitGCChan)
+			wgGCExit.Wait() //等待完全GC
+			return
+		case <-gcTicker.C:
+			_, err := runGC()
+			if err != nil {
+				log.Println(err)
+			}
+		}
+	}
 }
 
 func (proxy *DBProxy) GetCachePenetrateCnt() uint64 {
@@ -187,7 +318,7 @@ func (proxy *DBProxy) Gets(watchKey string, keys []string) (result []KV, version
 	if len(watchKey) != 0 {
 		_ = proxy.watchKeyMgr.Read(watchKey, func(keyVersion uint32) error {
 			version = keyVersion
-			txn := proxy.Db.NewTransaction(false)
+			txn := proxy.DB.NewTransaction(false)
 			defer txn.Discard()
 
 			for _, key := range keys {
@@ -202,7 +333,7 @@ func (proxy *DBProxy) Gets(watchKey string, keys []string) (result []KV, version
 		})
 		return result, version
 	} else {
-		txn := proxy.Db.NewTransaction(false)
+		txn := proxy.DB.NewTransaction(false)
 		defer txn.Discard()
 
 		for _, key := range keys {
