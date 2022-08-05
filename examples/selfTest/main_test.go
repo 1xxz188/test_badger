@@ -9,7 +9,6 @@ import (
 	"math/rand"
 	"os"
 	"test_badger/badgerApi"
-	"test_badger/controlEXE"
 	"test_badger/proxy"
 	"test_badger/util"
 	"testing"
@@ -34,17 +33,19 @@ func TestInsert(t *testing.T) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer db.Close()
+	defer func() {
+		_ = db.Close()
+	}()
 
 	var info Collect
 
-	if err := fnBatchUpdate(db, &info, 1); err != nil {
+	if err := fnBatchUpdate(db, &info, 1, 128); err != nil {
 		t.Error(err)
 	}
-	if err := fnBatchUpdate(db, &info, 2); err != nil {
+	if err := fnBatchUpdate(db, &info, 2, 128); err != nil {
 		t.Error(err)
 	}
-	if err := fnBatchUpdate(db, &info, 2); err != nil {
+	if err := fnBatchUpdate(db, &info, 2, 128); err != nil {
 		t.Error(err)
 	}
 }
@@ -54,7 +55,9 @@ func TestPrintVersion(t *testing.T) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer db.Close()
+	defer func() {
+		_ = db.Close()
+	}()
 
 	var info Collect
 	if err := fnBatchRead(db, &info, 1); err != nil {
@@ -89,7 +92,9 @@ func TestInsertVlog(t *testing.T) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer db.Close()
+	defer func() {
+		_ = db.Close()
+	}()
 
 	for y := 0; y < 0; y++ {
 		for i := 0; i < 10; i++ {
@@ -248,11 +253,15 @@ func TestBackup(t *testing.T) {
 
 	db, err = badger.Open(getTestOptions("./badgerbak-test/data"))
 	require.NoError(t, err)
-	defer db.Close()
+	defer func() {
+		_ = db.Close()
+	}()
 	bakNew, err := os.Open(bakFile.Name())
 	require.NoError(t, err)
-	defer bakNew.Close()
 
+	defer func() {
+		_ = bakNew.Close()
+	}()
 	require.NoError(t, db.Load(bakNew, 16))
 	badgerApi.PrintV(db)
 }
@@ -262,7 +271,9 @@ func TestDBCount(t *testing.T) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer db.Close()
+	defer func() {
+		_ = db.Close()
+	}()
 
 	now := time.Now()
 	fmt.Printf("DBCount: %d, cost: %s\n", badgerApi.GetDBCount(db), time.Since(now).String())
@@ -275,8 +286,7 @@ func TestDBCount(t *testing.T) {
 }
 
 func TestPrint(t *testing.T) {
-	c := controlEXE.CreateControlEXE()
-	proxyDB, err := proxy.CreateDBProxy(c, "./data")
+	proxyDB, err := proxy.CreateDBProxy("./data", nil)
 	require.NoError(t, err)
 	defer func() {
 		err := proxyDB.Close()

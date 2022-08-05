@@ -23,7 +23,7 @@ type GcInfo struct {
 }
 
 type DBProxy struct {
-	C                 *controlEXE.ControlEXE //协程生命周期控制器
+	C                 *controlEXE.ControlEXE //协程生命周期控制器(生产消息协程,消费协程,GC协程)
 	DB                *badger.DB             //底层数据
 	GCInfo            GcInfo
 	dbDir             string
@@ -41,7 +41,7 @@ type KV struct {
 	Err error  `json:"error"`
 }
 
-func CreateDBProxy(c *controlEXE.ControlEXE, dbDir string) (*DBProxy, error) {
+func CreateDBProxy(dbDir string, c *controlEXE.ControlEXE) (*DBProxy, error) {
 	db, err := badger.Open(badgerApi.DefaultOptions(dbDir))
 	if err != nil {
 		return nil, err
@@ -51,7 +51,7 @@ func CreateDBProxy(c *controlEXE.ControlEXE, dbDir string) (*DBProxy, error) {
 		return nil, errors.New("CreateDBProxy DB == nil")
 	}
 	if c == nil {
-		return nil, errors.New("CreateDBProxy C == nil")
+		c = controlEXE.CreateControlEXE()
 	}
 
 	watchKeyMgr, err := customWatchKey.New(1024)
@@ -149,6 +149,9 @@ func CreateDBProxy(c *controlEXE.ControlEXE, dbDir string) (*DBProxy, error) {
 	return proxy, nil
 }
 func (proxy *DBProxy) Close() error {
+	proxy.C.ProducerWait() //等待生产消息退出
+	proxy.C.ConsumerWait() //等待数据落地
+	proxy.C.AllWait()      //等待GC结束
 	log.Println("main() exit!!!")
 	return proxy.DB.Close()
 }

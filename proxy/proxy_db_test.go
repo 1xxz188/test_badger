@@ -17,8 +17,7 @@ import (
 
 func TestReadDB(t *testing.T) {
 	fn1 := func() {
-		c := controlEXE.CreateControlEXE()
-		proxy, err := CreateDBProxy(c, "./data")
+		proxy, err := CreateDBProxy("./data", nil)
 		require.NoError(t, err)
 		defer func() {
 			err := proxy.Close()
@@ -51,17 +50,16 @@ func TestReadDB(t *testing.T) {
 		err = proxy.SetsByVersion(watchKey, version, keys, entryList)
 		require.NoError(t, err)
 
-		c.CTXCancel() //触发退出信号
-		<-c.CTXDone()
-		c.ProducerWait()
-		c.ConsumerWait()
-		c.AllWait()
+		proxy.C.CTXCancel() //触发退出信号
+		<-proxy.C.CTXDone()
+		proxy.C.ProducerWait()
+		proxy.C.ConsumerWait()
+		proxy.C.AllWait()
 		fmt.Println("1 Exit...")
 	}
 
 	fn2 := func() {
-		c := controlEXE.CreateControlEXE()
-		proxy, err := CreateDBProxy(c, "./data")
+		proxy, err := CreateDBProxy("./data", nil)
 		require.NoError(t, err)
 
 		defer func() {
@@ -82,11 +80,11 @@ func TestReadDB(t *testing.T) {
 			require.Equal(t, []byte("v2"), kv.V)
 		}
 
-		c.CTXCancel() //触发退出信号
-		<-c.CTXDone()
-		c.ProducerWait()
-		c.ConsumerWait()
-		c.AllWait()
+		proxy.C.CTXCancel() //触发退出信号
+		<-proxy.C.CTXDone()
+		proxy.C.ProducerWait()
+		proxy.C.ConsumerWait()
+		proxy.C.AllWait()
 		fmt.Println("2 Exit...")
 	}
 	fn1()
@@ -94,8 +92,7 @@ func TestReadDB(t *testing.T) {
 }
 
 func TestSave(t *testing.T) {
-	c := controlEXE.CreateControlEXE()
-	proxy, err := CreateDBProxy(c, "./data")
+	proxy, err := CreateDBProxy("./data", nil)
 	defer func() {
 		err := proxy.Close()
 		require.NoError(t, err)
@@ -135,10 +132,10 @@ func TestSave(t *testing.T) {
 	go func() {
 		lastCnt := uint32(0)
 		ticker := time.NewTicker(time.Second)
-		c.AllAdd(1)
+		proxy.C.AllAdd(1)
 		defer func() {
 			ticker.Stop()
-			c.AllDone()
+			proxy.C.AllDone()
 		}()
 
 		for {
@@ -159,7 +156,7 @@ func TestSave(t *testing.T) {
 	for idx := 0; idx < 4; idx++ {
 		//4个并发竞争
 		for ii := 0; ii < 4; ii++ {
-			c.ProducerAdd(1)
+			proxy.C.ProducerAdd(1)
 			go func(c *controlEXE.ControlEXE, idx int) {
 				defer c.ProducerDone()
 				ticker := time.NewTicker(time.Millisecond * 10)
@@ -199,14 +196,14 @@ func TestSave(t *testing.T) {
 						}return*/
 					}
 				}
-			}(c, idx)
+			}(proxy.C, idx)
 		}
 	}
 
-	<-c.CTXDone()
-	c.ConsumerWait()
+	<-proxy.C.CTXDone()
+	proxy.C.ConsumerWait()
 	close(chPrintGo)
-	c.AllWait()
+	proxy.C.AllWait()
 	fmt.Println("Main Exit...")
 	//Print(db)
 }

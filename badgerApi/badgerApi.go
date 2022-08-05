@@ -42,7 +42,6 @@ type Config struct {
 import (
 	"fmt"
 	"github.com/dgraph-io/badger/v3"
-	"log"
 )
 
 type KV struct {
@@ -153,9 +152,9 @@ func Print(db *badger.DB) {
 		if err != nil {
 			panic(err)
 		}
-		log.Printf("%s: v_len[%d]\n", string(k), len(v))
+		fmt.Printf("%s: v_len[%d]\n", string(k), len(v))
 	}
-	log.Printf("all keys: %d\n", count)
+	fmt.Printf("all keys: %d\n", count)
 }
 func PrintV(db *badger.DB) {
 	txn := db.NewTransaction(false)

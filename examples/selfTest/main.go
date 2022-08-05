@@ -15,7 +15,6 @@ import (
 	"sync/atomic"
 	"syscall"
 	"test_badger/badgerApi"
-	"test_badger/controlEXE"
 	"test_badger/logger"
 	"test_badger/proxy"
 	"test_badger/rateLimiter"
@@ -33,9 +32,7 @@ type Collect struct {
 	bigger1SecCount  int64
 }
 
-var dataLen int
-
-func fnBatchUpdate(db *badger.DB, info *Collect, id int) error {
+func fnBatchUpdate(db *badger.DB, info *Collect, id int, dataLen int) error {
 	wb := db.NewWriteBatch()
 	defer wb.Cancel()
 
@@ -256,12 +253,82 @@ func fnBatchRead2(db *proxy.DBProxy, info *Collect, id int) error {
 	return nil
 }
 
+//work 处理数据
+func work(proxyDB *proxy.DBProxy, coroutines int, op string, chId chan int, totalSendCnt *int64) {
+	for i := 0; i < coroutines; i++ {
+		proxyDB.C.ProducerAdd(1)
+		go func(sendId int) {
+			chClose := make(chan struct{})
+
+			defer func() {
+				close(chClose)
+				proxyDB.C.ProducerDone()
+			}()
+
+			var updateInfo Collect
+			var getInfo Collect
+			go func() {
+				ticker := time.NewTicker(time.Second * 10)
+				for { //循环
+					select {
+					case <-ticker.C:
+						if updateInfo.setCount > 0 {
+							log.Printf("[%d]updateInfo> sendCnt[%d] avg[%d us] max[%d ms] >=10ms[%d] >=100ms[%d] >=300ms[%d] >=1000ms[%d]\n",
+								sendId, updateInfo.setCount, updateInfo.totalMic/updateInfo.setCount, updateInfo.maxMs, updateInfo.bigger10MsCount, updateInfo.bigger100MsCount, updateInfo.bigger300MsCount, updateInfo.bigger1SecCount)
+						}
+
+						if getInfo.setCount > 0 {
+							log.Printf("[%d]getInfo> sendCnt[%d] avg[%d us] max[%d ms] >=10ms[%d] >=100ms[%d] >=300ms[%d] >=1000ms[%d]\n",
+								sendId, getInfo.setCount, getInfo.totalMic/getInfo.setCount, getInfo.maxMs, getInfo.bigger10MsCount, getInfo.bigger100MsCount, getInfo.bigger300MsCount, getInfo.bigger1SecCount)
+						}
+					case <-chClose:
+						return
+					}
+				}
+			}()
+
+			if op == "insert" || op == "set" {
+				for id := range chId {
+					if err := fnBatchUpdate2(proxyDB, &updateInfo, id); err != nil {
+						panic(err)
+					}
+				}
+			} else if op == "get" {
+				for id := range chId {
+					if err := fnBatchRead2(proxyDB, &getInfo, id); err != nil {
+						panic(err)
+					}
+				}
+			} else {
+				for id := range chId {
+					if err := fnBatchRead2(proxyDB, &getInfo, id); err != nil {
+						panic(err)
+					}
+					if err := fnBatchUpdate2(proxyDB, &updateInfo, id); err != nil {
+						panic(err)
+					}
+				}
+			}
+
+			if updateInfo.setCount > 0 {
+				log.Printf("[%d]updateInfo> over sendCnt[%d] avg[%d us] max[%d ms] >=10ms[%d] >=100ms[%d] >=300ms[%d] >=1000ms[%d]\n",
+					sendId, updateInfo.setCount, updateInfo.totalMic/updateInfo.setCount, updateInfo.maxMs, updateInfo.bigger10MsCount, updateInfo.bigger100MsCount, updateInfo.bigger300MsCount, updateInfo.bigger1SecCount)
+			}
+			if getInfo.setCount > 0 {
+				log.Printf("[%d]getInfo> over sendCnt[%d] avg[%d us] max[%d ms] >=10ms[%d] >=100ms[%d] >=300ms[%d] >=1000ms[%d]\n",
+					sendId, getInfo.setCount, getInfo.totalMic/getInfo.setCount, getInfo.maxMs, getInfo.bigger10MsCount, getInfo.bigger100MsCount, getInfo.bigger300MsCount, getInfo.bigger1SecCount)
+			}
+			atomic.AddInt64(totalSendCnt, updateInfo.setCount)
+			atomic.AddInt64(totalSendCnt, getInfo.setCount)
+		}(i)
+	}
+}
+
 func main() {
 	go func() {
 		fmt.Println(http.ListenAndServe("0.0.0.0:58000", nil))
 	}()
 	cmap.SHARD_COUNT = 1024
-	//./go_badger --op="get-set" -c 12 --stayTm="1m" --totalLimit=20000 --beginId=10000 --sendLimit=1 --dataSize=128
 	op := kingpin.Flag("op", "[insert] [get] [set] [get-set]").Default("get-set").String()
 	lsmMaxValue := kingpin.Flag("lsmMaxValue", "with value threshold for lsm").Default("65").Int64() //大于指针大小即可
 	coroutines := kingpin.Flag("coroutines", "logic coroutines for client").Short('c').Default("4").Int()
@@ -283,20 +350,16 @@ func main() {
 	kingpin.Version("v0.0.1")
 	kingpin.Parse()
 
-	//insert> ./go_badger --op="insert" -c 6 --insertNum=2000000
-	//get-set> ./go_badger --op="get-set" -c 6 --stayTm="1m" --totalLimit=20000 --beginId=10000 --sendLimit=40
-
-	//insert> ./go_badger --op="insert" -c 6 --insertNum=2000000 --lsmMaxValue=512
 	if *dataSize <= 0 {
 		panic("dataSize should be >= 0")
 	}
 
-	dataLen = *dataSize
+	dataLen := *dataSize
 
 	openTm := time.Now()
 	log.Printf("openTm[%d ms] dataLen[%d], lsmMaxValue[%d]\n", time.Since(openTm).Milliseconds(), dataLen, *lsmMaxValue)
 
-	proxyDB, err := proxy.CreateDBProxy(controlEXE.CreateControlEXE(), "./data")
+	proxyDB, err := proxy.CreateDBProxy("./data", nil)
 	if err != nil {
 		panic(err)
 	}
@@ -461,75 +524,4 @@ func main() {
 	fmt.Printf("[%d] Map_ cost: %s\n", badgerApi.GetPreDBCount(proxyDB.DB, "Map_"), time.Since(now).String())
 
 	fmt.Printf("GetCachePenetrateCnt: %d\n", proxyDB.GetCachePenetrateCnt())
-}
-
-//work 处理数据
-func work(proxyDB *proxy.DBProxy, coroutines int, op string, chId chan int, totalSendCnt *int64) {
-	for i := 0; i < coroutines; i++ {
-		proxyDB.C.ProducerAdd(1)
-		go func(sendId int) {
-			chClose := make(chan struct{})
-
-			defer func() {
-				close(chClose)
-				proxyDB.C.ProducerDone()
-			}()
-
-			var updateInfo Collect
-			var getInfo Collect
-			go func() {
-				ticker := time.NewTicker(time.Second * 10)
-				for { //循环
-					select {
-					case <-ticker.C:
-						if updateInfo.setCount > 0 {
-							log.Printf("[%d]updateInfo> sendCnt[%d] avg[%d us] max[%d ms] >=10ms[%d] >=100ms[%d] >=300ms[%d] >=1000ms[%d]\n",
-								sendId, updateInfo.setCount, updateInfo.totalMic/updateInfo.setCount, updateInfo.maxMs, updateInfo.bigger10MsCount, updateInfo.bigger100MsCount, updateInfo.bigger300MsCount, updateInfo.bigger1SecCount)
-						}
-
-						if getInfo.setCount > 0 {
-							log.Printf("[%d]getInfo> sendCnt[%d] avg[%d us] max[%d ms] >=10ms[%d] >=100ms[%d] >=300ms[%d] >=1000ms[%d]\n",
-								sendId, getInfo.setCount, getInfo.totalMic/getInfo.setCount, getInfo.maxMs, getInfo.bigger10MsCount, getInfo.bigger100MsCount, getInfo.bigger300MsCount, getInfo.bigger1SecCount)
-						}
-					case <-chClose:
-						return
-					}
-				}
-			}()
-
-			if op == "insert" || op == "set" {
-				for id := range chId {
-					if err := fnBatchUpdate2(proxyDB, &updateInfo, id); err != nil {
-						panic(err)
-					}
-				}
-			} else if op == "get" {
-				for id := range chId {
-					if err := fnBatchRead2(proxyDB, &getInfo, id); err != nil {
-						panic(err)
-					}
-				}
-			} else {
-				for id := range chId {
-					if err := fnBatchRead2(proxyDB, &getInfo, id); err != nil {
-						panic(err)
-					}
-					if err := fnBatchUpdate2(proxyDB, &updateInfo, id); err != nil {
-						panic(err)
-					}
-				}
-			}
-
-			if updateInfo.setCount > 0 {
-				log.Printf("[%d]updateInfo> over sendCnt[%d] avg[%d us] max[%d ms] >=10ms[%d] >=100ms[%d] >=300ms[%d] >=1000ms[%d]\n",
-					sendId, updateInfo.setCount, updateInfo.totalMic/updateInfo.setCount, updateInfo.maxMs, updateInfo.bigger10MsCount, updateInfo.bigger100MsCount, updateInfo.bigger300MsCount, updateInfo.bigger1SecCount)
-			}
-			if getInfo.setCount > 0 {
-				log.Printf("[%d]getInfo> over sendCnt[%d] avg[%d us] max[%d ms] >=10ms[%d] >=100ms[%d] >=300ms[%d] >=1000ms[%d]\n",
-					sendId, getInfo.setCount, getInfo.totalMic/getInfo.setCount, getInfo.maxMs, getInfo.bigger10MsCount, getInfo.bigger100MsCount, getInfo.bigger300MsCount, getInfo.bigger1SecCount)
-			}
-			atomic.AddInt64(totalSendCnt, updateInfo.setCount)
-			atomic.AddInt64(totalSendCnt, getInfo.setCount)
-		}(i)
-	}
 }
