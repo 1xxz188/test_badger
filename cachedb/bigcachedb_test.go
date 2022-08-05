@@ -10,7 +10,7 @@ import (
 )
 
 func TestDemo(t *testing.T) {
-	db, err := NewBigCache(func(key string, entry []byte, reason RemoveReason) {
+	db, err := NewBigCache(DefaultBigCacheOptions(), func(key string, entry []byte, reason RemoveReason) {
 		t.Logf("Remove [%s], reason[%d]\n", key, reason)
 	})
 	require.NoError(t, err)
@@ -90,9 +90,10 @@ func TestRemoveExpired(t *testing.T) {
 
 func TestDBInsert(t *testing.T) {
 	t.Parallel()
-	db, err := NewBigCache(func(key string, entry []byte, reason RemoveReason) {
+	db, err := NewBigCache(DefaultBigCacheOptions(), func(key string, entry []byte, reason RemoveReason) {
 		t.Logf("Remove [%s], reason[%d]\n", key, reason)
 	})
+
 	require.NoError(t, err)
 	defer func() {
 		err := db.Close()

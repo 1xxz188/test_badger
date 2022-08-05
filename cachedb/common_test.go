@@ -7,7 +7,7 @@ import (
 
 func TestBigCache(t *testing.T) {
 	var db Cache
-	db, err := NewBigCache(func(key string, entry []byte, reason RemoveReason) {
+	db, err := NewBigCache(DefaultBigCacheOptions(), func(key string, entry []byte, reason RemoveReason) {
 		t.Logf("Remove [%s], reason[%d]\n", key, reason)
 	})
 	require.NoError(t, err)

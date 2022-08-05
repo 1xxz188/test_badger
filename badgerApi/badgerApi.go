@@ -47,9 +47,8 @@ import (
 type KV struct {
 	K         string `json:"key"`
 	V         []byte `json:"value"`
-	Version   uint64 `json:"version"`
 	ExpiresAt uint64 `json:"expiresAt"`
-	UserMeta  byte   `json:"userMeta"`
+	Err       error  `json:"error"`
 }
 
 func DefaultOptions(path string) badger.Options {
@@ -102,8 +101,6 @@ func GetValue(db *badger.DB, key string) (*KV, error) {
 	return &KV{
 		K:         key,
 		V:         v,
-		Version:   item.Version(),
-		UserMeta:  item.UserMeta(),
 		ExpiresAt: item.ExpiresAt(),
 	}, nil
 }
@@ -129,8 +126,6 @@ func GetRange(db *badger.DB, begin int, end int) (result []KV) {
 		result = append(result, KV{
 			K:         string(k),
 			V:         v,
-			Version:   itr.Item().Version(),
-			UserMeta:  itr.Item().UserMeta(),
 			ExpiresAt: itr.Item().ExpiresAt(),
 		})
 		if count > end {

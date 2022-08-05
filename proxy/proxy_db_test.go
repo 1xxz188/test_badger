@@ -9,13 +9,17 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"test_badger/badgerApi"
 	"test_badger/cachedb"
 	"test_badger/controlEXE"
+	"test_badger/util"
 	"testing"
 	"time"
 )
 
 func TestReadDB(t *testing.T) {
+	util.RemoveDir("./data")
+	defer util.RemoveDir("./data")
 	fn1 := func() {
 		proxy, err := CreateDBProxy(DefaultOptions("./data"))
 		require.NoError(t, err)
@@ -34,20 +38,22 @@ func TestReadDB(t *testing.T) {
 			require.Equal(t, cachedb.ErrEntryNotFound, kv.Err)
 		}
 
-		entryList := [][]byte{[]byte("v1")}
-		err = proxy.SetsByVersion(watchKey, version, keys, entryList)
+		kvs := append([]badgerApi.KV(nil), badgerApi.KV{
+			K: keys[0],
+			V: []byte("v1"),
+		})
+		err = proxy.SetsByVersion(watchKey, version, kvs)
 		require.NoError(t, err)
 
 		kvList, version = proxy.Gets(watchKey, keys)
 		require.Equal(t, 1, len(kvList))
 		require.Equal(t, uint32(2), version)
-		for i, kv := range kvList {
+		for _, kv := range kvList {
 			require.Equal(t, nil, kv.Err)
-			t.Logf("[%d] %+v\n", i, kv)
 		}
 
-		entryList = [][]byte{[]byte("v2")}
-		err = proxy.SetsByVersion(watchKey, version, keys, entryList)
+		kvs[0].V = []byte("v2")
+		err = proxy.SetsByVersion(watchKey, version, kvs)
 		require.NoError(t, err)
 
 		proxy.C.CTXCancel() //触发退出信号
@@ -92,6 +98,8 @@ func TestReadDB(t *testing.T) {
 }
 
 func TestSave(t *testing.T) {
+	util.RemoveDir("./data")
+	defer util.RemoveDir("./data")
 	proxy, err := CreateDBProxy(DefaultOptions("./data"))
 	defer func() {
 		err := proxy.Close()
@@ -122,9 +130,7 @@ func TestSave(t *testing.T) {
 		panic("len(items) != len(keyList)")
 	}
 	for _, item := range items {
-		if item.Err != nil {
-			require.NoError(t, err)
-		}
+		require.Error(t, item.Err)
 	}
 
 	setCnt := uint32(0)
@@ -159,7 +165,7 @@ func TestSave(t *testing.T) {
 			proxy.C.ProducerAdd(1)
 			go func(c *controlEXE.ControlEXE, idx int) {
 				defer c.ProducerDone()
-				ticker := time.NewTicker(time.Millisecond * 10)
+				ticker := time.NewTicker(time.Millisecond)
 				defer ticker.Stop()
 				count := 0
 				for {
@@ -167,22 +173,20 @@ func TestSave(t *testing.T) {
 					case _ = <-ticker.C:
 						count++
 						//now := time.Now()
-						var keyList []string
-						var valueList [][]byte
+						var kvs []badgerApi.KV
 
 						for i := idx * intervalV; i < idx*intervalV+intervalV; i++ {
-							key := fmt.Sprintf("key_%d", i)
-							value := []byte(fmt.Sprintf("value_%d_%d", i, count))
-							//fmt.Printf("Set key: %s\n", string(key))
-							keyList = append(keyList, key)
-							valueList = append(valueList, value)
+							kvs = append(kvs, badgerApi.KV{
+								K: fmt.Sprintf("key_%d", i),
+								V: []byte(fmt.Sprintf("value_%d_%d", i, count)),
+							})
 						}
 						watchKey := fmt.Sprintf("watchKey_%d", idx)
 						err = proxy.watchKeyMgr.Read(watchKey, func(keyVersion uint32) error {
 							return nil
 						})
 						require.NoError(t, err)
-						err = proxy.Sets(watchKey, keyList, valueList)
+						err = proxy.Sets(watchKey, kvs)
 						require.NoError(t, err)
 						atomic.AddUint32(&setCnt, 1)
 						//fmt.Printf("Set cost[%d ms]\n", time.Since(now).Milliseconds())

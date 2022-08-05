@@ -11,6 +11,7 @@ import (
 	"test_badger/badgerApi"
 	"test_badger/proxy"
 	"test_badger/util"
+	"test_badger/web"
 	"testing"
 	"time"
 )
@@ -294,4 +295,15 @@ func TestPrint(t *testing.T) {
 	}()
 
 	badgerApi.Print(proxyDB.DB)
+}
+
+func TestWeb(t *testing.T) {
+	proxyDB, err := proxy.CreateDBProxy(proxy.DefaultOptions("./data"))
+	require.NoError(t, err)
+	defer func() {
+		err := proxyDB.Close()
+		require.NoError(t, err)
+	}()
+	//开启网页查询
+	web.RunWeb("0.0.0.0:11001", proxyDB)
 }

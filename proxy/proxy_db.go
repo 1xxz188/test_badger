@@ -8,9 +8,12 @@ import (
 	"log"
 	"sync"
 	"sync/atomic"
+	"test_badger/badgerApi"
 	"test_badger/cachedb"
 	"test_badger/controlEXE"
 	"test_badger/customWatchKey"
+	"test_badger/serialize"
+	"test_badger/serialize/json"
 	"test_badger/util"
 	"time"
 )
@@ -32,12 +35,7 @@ type DBProxy struct {
 	cachePenetrateCnt uint64                      //缓存穿透次数
 	_                 [56]byte                    //cpu cache
 	cacheCnt          uint64                      //缓存命中次数
-}
-
-type KV struct {
-	K   string `json:"key"`
-	V   []byte `json:"value"`
-	Err error  `json:"error"`
+	serializer        serialize.Serializer
 }
 
 func CreateDBProxy(opt Opts) (*DBProxy, error) {
@@ -57,6 +55,7 @@ func CreateDBProxy(opt Opts) (*DBProxy, error) {
 		dbDir:       opt.optBadger.Dir,
 		watchKeyMgr: watchKeyMgr,
 		noSaveMap:   cmap.New(),
+		serializer:  json.NewSerializer(),
 	}
 
 	*opt.fnRemoveButNotDel = func(key string, entry []byte) {
@@ -258,14 +257,21 @@ func (proxy *DBProxy) GetCachePenetrateRate() float64 {
 	return float64(proxy.GetCachePenetrateCnt()) / float64(proxy.GetCacheCnt())
 }
 
-func (proxy *DBProxy) get(txn *badger.Txn, key string) ([]byte, error) {
+func (proxy *DBProxy) get(txn *badger.Txn, key string) *badgerApi.KV {
 	data, err := proxy.cache.Get(key)
+	var kv badgerApi.KV
+	kv.K = key
 	if err == nil {
 		atomic.AddUint64(&proxy.cacheCnt, 1)
-		return data, nil //命中缓存返回数据
+		err := proxy.serializer.Unmarshal(data, &kv)
+		if err != nil {
+			kv.Err = err
+		}
+		return &kv //命中缓存返回数据
 	}
 	if err != cachedb.ErrEntryNotFound {
-		return nil, err
+		kv.Err = err
+		return &kv
 	}
 
 	atomic.AddUint64(&proxy.cachePenetrateCnt, 1)
@@ -273,25 +279,32 @@ func (proxy *DBProxy) get(txn *badger.Txn, key string) ([]byte, error) {
 	//穿透到badger
 	item, err := txn.Get([]byte(key))
 	if err != nil {
+		kv.Err = err
 		if err == badger.ErrKeyNotFound { //转换错误
-			return nil, cachedb.ErrEntryNotFound
+			kv.Err = cachedb.ErrEntryNotFound
 		}
-		return nil, err
+		return &kv
 	}
 	v, err := item.ValueCopy(nil)
 	if err != nil {
-		return nil, err
+		kv.Err = err
+		return &kv
 	}
 
 	//更新到缓存中
 	err = proxy.cache.Set(key, v)
 	if err != nil {
-		return nil, err
+		kv.Err = err
+		return &kv
 	}
-	return v, nil
+	err = proxy.serializer.Unmarshal(v, &kv)
+	if err != nil {
+		kv.Err = err
+	}
+	return &kv
 }
 
-func (proxy *DBProxy) Gets(watchKey string, keys []string) (result []KV, version uint32) {
+func (proxy *DBProxy) Gets(watchKey string, keys []string) (result []*badgerApi.KV, version uint32) {
 	if len(watchKey) != 0 {
 		_ = proxy.watchKeyMgr.Read(watchKey, func(keyVersion uint32) error {
 			version = keyVersion
@@ -299,12 +312,7 @@ func (proxy *DBProxy) Gets(watchKey string, keys []string) (result []KV, version
 			defer txn.Discard()
 
 			for _, key := range keys {
-				item, err := proxy.get(txn, key)
-				result = append(result, KV{
-					K:   key,
-					V:   item,
-					Err: err,
-				})
+				result = append(result, proxy.get(txn, key))
 			}
 			return nil
 		})
@@ -314,33 +322,29 @@ func (proxy *DBProxy) Gets(watchKey string, keys []string) (result []KV, version
 		defer txn.Discard()
 
 		for _, key := range keys {
-			item, err := proxy.get(txn, key)
-			result = append(result, KV{
-				K:   key,
-				V:   item,
-				Err: err,
-			})
+			result = append(result, proxy.get(txn, key))
 		}
 		return result, 0
 	}
 }
-func (proxy *DBProxy) set(key string, entry []byte) error {
-	if err := proxy.cache.Set(key, entry); err != nil {
+func (proxy *DBProxy) set(kv *badgerApi.KV) error {
+	v, err := proxy.serializer.Marshal(kv)
+	if err != nil {
 		return err
 	}
-	proxy.noSaveMap.Set(key, nil)
+	if err := proxy.cache.Set(kv.K, v); err != nil {
+		return err
+	}
+	proxy.noSaveMap.Set(kv.K, nil)
 	return nil
 }
 
 // Sets TODO 改protobuf结构参数
-func (proxy *DBProxy) Sets(watchKey string, keys []string, entryList [][]byte) error {
-	if len(keys) != len(entryList) {
-		return errors.New("len(keys) != len(entryList)")
-	}
+func (proxy *DBProxy) Sets(watchKey string, kvs []badgerApi.KV) error {
 	if len(watchKey) != 0 {
 		return proxy.watchKeyMgr.Write(watchKey, 0, false, func(keyVersion uint32) error {
-			for i := 0; i < len(keys); i++ {
-				err := proxy.set(keys[i], entryList[i])
+			for i := 0; i < len(kvs); i++ {
+				err := proxy.set(&kvs[i])
 				if err != nil {
 					return err
 				}
@@ -348,8 +352,8 @@ func (proxy *DBProxy) Sets(watchKey string, keys []string, entryList [][]byte) e
 			return nil
 		})
 	} else {
-		for i := 0; i < len(keys); i++ {
-			err := proxy.set(keys[i], entryList[i])
+		for i := 0; i < len(kvs); i++ {
+			err := proxy.set(&kvs[i])
 			if err != nil {
 				return err
 			}
@@ -358,13 +362,10 @@ func (proxy *DBProxy) Sets(watchKey string, keys []string, entryList [][]byte) e
 	}
 }
 
-func (proxy *DBProxy) SetsByVersion(watchKey string, keyVersion uint32, keys []string, entryList [][]byte) error {
-	if len(keys) != len(entryList) {
-		return errors.New("len(keys) != len(entryList)")
-	}
+func (proxy *DBProxy) SetsByVersion(watchKey string, keyVersion uint32, kvs []badgerApi.KV) error {
 	return proxy.watchKeyMgr.Write(watchKey, keyVersion, true, func(keyVersion uint32) error {
-		for i := 0; i < len(keys); i++ {
-			err := proxy.set(keys[i], entryList[i])
+		for i := 0; i < len(kvs); i++ {
+			err := proxy.set(&kvs[i])
 			if err != nil {
 				return err
 			}

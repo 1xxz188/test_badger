@@ -158,28 +158,34 @@ func fnBatchRead(db *badger.DB, info *Collect, id int) error {
 }
 func fnBatchUpdate2(db *proxy.DBProxy, info *Collect, id int) error {
 	//insertData := util.RandData(dataLen)
-
-	keyList := append([]string(nil),
-		"Role_"+strconv.Itoa(10000000+id),
-		"Item_"+strconv.Itoa(10000000+id),
-		"Build_"+strconv.Itoa(10000000+id),
-		"Home_"+strconv.Itoa(10000000+id),
-		"Map_"+strconv.Itoa(10000000+id),
-	)
-
 	insertData := []byte(fmt.Sprintf("value_%d", info.setCount))
-	valueList := append([][]byte(nil),
-		insertData,
-		insertData,
-		insertData,
-		insertData,
-		insertData,
+	kvs := append([]badgerApi.KV(nil),
+		badgerApi.KV{
+			K: "Role_" + strconv.Itoa(10000000+id),
+			V: insertData,
+		},
+		badgerApi.KV{
+			K: "Item_" + strconv.Itoa(10000000+id),
+			V: insertData,
+		},
+		badgerApi.KV{
+			K: "Build_" + strconv.Itoa(10000000+id),
+			V: insertData,
+		},
+		badgerApi.KV{
+			K: "Home_" + strconv.Itoa(10000000+id),
+			V: insertData,
+		},
+		badgerApi.KV{
+			K: "Map_" + strconv.Itoa(10000000+id),
+			V: insertData,
+		},
 	)
 
 	beginTm := time.Now()
 
 	//watchKey := "Watch_" + strconv.Itoa(10000000+id)
-	err := db.Sets("", keyList, valueList)
+	err := db.Sets("", kvs)
 	if err != nil {
 		return err
 	}
@@ -225,7 +231,7 @@ func fnBatchRead2(db *proxy.DBProxy, info *Collect, id int) error {
 	}
 	for _, item := range items {
 		if item.Err != nil {
-			logger.Log.Fatalf("key[%s] %s", item.K, item.Err)
+			logger.Log.Fatalf("id[%d] key[%s] %s", id, item.K, item.Err)
 		}
 	}
 	diffMS := time.Since(beginTm).Milliseconds()
@@ -325,9 +331,6 @@ func work(proxyDB *proxy.DBProxy, coroutines int, op string, chId chan int, tota
 }
 
 func main() {
-	go func() {
-		fmt.Println(http.ListenAndServe("0.0.0.0:58000", nil))
-	}()
 	cmap.SHARD_COUNT = 1024
 	op := kingpin.Flag("op", "[insert] [get] [set] [get-set]").Default("get-set").String()
 	lsmMaxValue := kingpin.Flag("lsmMaxValue", "with value threshold for lsm").Default("65").Int64() //大于指针大小即可
@@ -346,6 +349,9 @@ func main() {
 	kCurBeginId := kingpin.Flag("beginId", "[get-set] begin id").Default("10000").Int()
 	kSendLimit := kingpin.Flag("sendLimit", "[get-set] send count for per ms").Default("1").Int()
 
+	kPprof := kingpin.Flag("pprof", "ip:port of pprof listen addr").Default("0.0.0.0:11000").String()
+	kWebAddr := kingpin.Flag("web", "ip:port of web listen addr").Default("0.0.0.0:11001").String()
+
 	kingpin.HelpFlag.Short('h')
 	kingpin.Version("v0.0.1")
 	kingpin.Parse()
@@ -353,8 +359,11 @@ func main() {
 	if *dataSize <= 0 {
 		panic("dataSize should be >= 0")
 	}
-
 	dataLen := *dataSize
+
+	go func() {
+		fmt.Println(http.ListenAndServe(*kPprof, nil))
+	}()
 
 	openTm := time.Now()
 	log.Printf("openTm[%d ms] dataLen[%d], lsmMaxValue[%d]\n", time.Since(openTm).Milliseconds(), dataLen, *lsmMaxValue)
@@ -373,7 +382,7 @@ func main() {
 	//开启GC
 	go proxyDB.RunGC(*kGcRate)
 	//开启网页查询
-	go web.RunWeb("0.0.0.0:4000", proxyDB)
+	go web.RunWeb(*kWebAddr, proxyDB)
 
 	chId := make(chan int, 1024*20)
 	totalSendCnt := int64(0)
