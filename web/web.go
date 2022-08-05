@@ -24,6 +24,7 @@ func RunWeb(listenAddr string, proxy *proxy.DBProxy) { //"0.0.0.0:4000"
 		ReadTimeout:       5 * time.Second,
 		WriteTimeout:      10 * time.Second,
 	})
+
 	//这个限制是针对同一个ip
 	confLimiter := limiter.ConfigDefault
 	confLimiter.Max = 10

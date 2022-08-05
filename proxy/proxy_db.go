@@ -8,7 +8,6 @@ import (
 	"log"
 	"sync"
 	"sync/atomic"
-	"test_badger/badgerApi"
 	"test_badger/cachedb"
 	"test_badger/controlEXE"
 	"test_badger/customWatchKey"
@@ -41,17 +40,10 @@ type KV struct {
 	Err error  `json:"error"`
 }
 
-func CreateDBProxy(dbDir string, c *controlEXE.ControlEXE) (*DBProxy, error) {
-	db, err := badger.Open(badgerApi.DefaultOptions(dbDir))
+func CreateDBProxy(opt Opts) (*DBProxy, error) {
+	db, err := badger.Open(opt.optBadger)
 	if err != nil {
 		return nil, err
-	}
-
-	if db == nil {
-		return nil, errors.New("CreateDBProxy DB == nil")
-	}
-	if c == nil {
-		c = controlEXE.CreateControlEXE()
 	}
 
 	watchKeyMgr, err := customWatchKey.New(1024)
@@ -60,18 +52,14 @@ func CreateDBProxy(dbDir string, c *controlEXE.ControlEXE) (*DBProxy, error) {
 	}
 	proxy := &DBProxy{
 		DB:          db,
-		C:           c,
-		dbDir:       dbDir,
+		C:           opt.c,
+		cache:       opt.cache,
+		dbDir:       opt.optBadger.Dir,
 		watchKeyMgr: watchKeyMgr,
 		noSaveMap:   cmap.New(),
 	}
 
-	cache, err := cachedb.NewBigCache(func(key string, entry []byte, reason cachedb.RemoveReason) {
-		//进入缓存淘汰，不存在移除的时候同时插入(底层有分片锁)
-		//fmt.Printf("Remove [%s], reason[%d]\n", key, reason)
-		if reason == cachedb.Deleted {
-			return //定期保存的时候自然会过滤掉已删除的key
-		}
+	*opt.fnRemoveButNotDel = func(key string, entry []byte) {
 		//如果未保存则保存
 		_, ok := proxy.noSaveMap.Get(key)
 		if !ok {
@@ -79,19 +67,14 @@ func CreateDBProxy(dbDir string, c *controlEXE.ControlEXE) (*DBProxy, error) {
 		}
 		proxy.noSaveMap.Remove(key)
 		_ = proxy.DB.Update(func(txn *badger.Txn) error {
-			fmt.Printf("warning save by remove key[%s] reason[%d]\n", key, reason)
+			//fmt.Printf("warning save by remove key[%s] reason[%d]\n", key, reason)
 			return txn.Set([]byte(key), entry)
 		})
-	})
-
-	if err != nil {
-		return nil, err
 	}
-	proxy.cache = cache
 
-	c.ConsumerAdd(1)
+	proxy.C.ConsumerAdd(1)
 	go func() {
-		defer c.ConsumerDone()
+		defer proxy.C.ConsumerDone()
 		//interval save
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
@@ -113,7 +96,7 @@ func CreateDBProxy(dbDir string, c *controlEXE.ControlEXE) (*DBProxy, error) {
 			now = time.Now()
 			for key := range toSave {
 				proxy.noSaveMap.Remove(key)
-				v, err = cache.Get(key)
+				v, err = proxy.cache.Get(key)
 				if err != nil {
 					continue
 				}
@@ -135,9 +118,9 @@ func CreateDBProxy(dbDir string, c *controlEXE.ControlEXE) (*DBProxy, error) {
 			select {
 			case _ = <-ticker.C:
 				saveData()
-			case <-c.CTXDone():
+			case <-proxy.C.CTXDone():
 				//wait all data save
-				c.ProducerWait() //wait all send data coroutine exit
+				proxy.C.ProducerWait() //wait all send data coroutine exit
 				fmt.Println("wait all data save")
 				saveData()
 				fmt.Println("all data save ok")

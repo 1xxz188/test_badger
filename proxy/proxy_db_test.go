@@ -17,7 +17,7 @@ import (
 
 func TestReadDB(t *testing.T) {
 	fn1 := func() {
-		proxy, err := CreateDBProxy("./data", nil)
+		proxy, err := CreateDBProxy(DefaultOptions("./data"))
 		require.NoError(t, err)
 		defer func() {
 			err := proxy.Close()
@@ -59,7 +59,7 @@ func TestReadDB(t *testing.T) {
 	}
 
 	fn2 := func() {
-		proxy, err := CreateDBProxy("./data", nil)
+		proxy, err := CreateDBProxy(DefaultOptions("./data"))
 		require.NoError(t, err)
 
 		defer func() {
@@ -92,7 +92,7 @@ func TestReadDB(t *testing.T) {
 }
 
 func TestSave(t *testing.T) {
-	proxy, err := CreateDBProxy("./data", nil)
+	proxy, err := CreateDBProxy(DefaultOptions("./data"))
 	defer func() {
 		err := proxy.Close()
 		require.NoError(t, err)
@@ -292,4 +292,31 @@ func TestByteFmt(t *testing.T) {
 	key := "key1"
 	v := []byte("you\\0me")
 	fmt.Println(fmt.Sprintf("{\"key\": \"%s\",\"value\":\"%s\"}", key, v))
+}
+
+type OptF struct {
+	fn                func(key string, entry []byte)
+	fnRemoveButNotDel *func(key string, entry []byte)
+}
+
+func TestFnCallFn(t *testing.T) {
+	defaultOptions := func() OptF {
+		fnRemoveButNotDel := new(func(key string, entry []byte))
+		fn := func(key string, entry []byte) {
+			//Call
+			require.NotNil(t, *fnRemoveButNotDel)
+			(*fnRemoveButNotDel)(key, entry)
+		}
+		return OptF{
+			fn:                fn,
+			fnRemoveButNotDel: fnRemoveButNotDel,
+		}
+	}
+
+	op := defaultOptions()
+	*op.fnRemoveButNotDel = func(key string, entry []byte) {
+		require.Equal(t, "you", key)
+		require.Equal(t, []byte("my"), entry)
+	}
+	op.fn("you", []byte("my"))
 }

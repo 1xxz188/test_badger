@@ -10,7 +10,17 @@ type BigCacheAPI struct {
 	cache *bigcache.BigCache
 }
 
-func NewBigCache(fnRemove func(key string, entry []byte, reason RemoveReason)) (*BigCacheAPI, error) {
+func DefaultBigCacheOptions() bigcache.Config {
+	config := bigcache.DefaultConfig(10 * time.Minute)
+	config.Shards = 1024               //2`14
+	config.HardMaxCacheSize = 1024 * 2 //2G
+	config.MaxEntrySize = 1024
+	config.MaxEntriesInWindow = 400000 * 6
+	config.CleanWindow = 7 * time.Second //不要太长，避免更新频繁导致满缓存被动淘汰 假设20w pqs --> 10s=200w条缓存
+	return config
+}
+
+func NewBigCache(opt bigcache.Config, fnRemove func(key string, entry []byte, reason RemoveReason)) (*BigCacheAPI, error) {
 	onRemove := func(key string, entry []byte, reason bigcache.RemoveReason) {
 		if fnRemove != nil {
 			switch reason {
@@ -26,14 +36,8 @@ func NewBigCache(fnRemove func(key string, entry []byte, reason RemoveReason)) (
 		}
 	}
 
-	config := bigcache.DefaultConfig(10 * time.Minute)
-	config.Shards = 1024               //2`14
-	config.HardMaxCacheSize = 1024 * 2 //2G
-	config.MaxEntrySize = 1024
-	config.MaxEntriesInWindow = 400000 * 6
-	config.CleanWindow = 7 * time.Second //不要太长，避免更新频繁导致满缓存被动淘汰 假设20w pqs --> 10s=200w条缓存
-	config.OnRemoveWithReason = onRemove
-	cache, err := bigcache.NewBigCache(config)
+	opt.OnRemoveWithReason = onRemove
+	cache, err := bigcache.NewBigCache(opt)
 	if err != nil {
 		return nil, err
 	}

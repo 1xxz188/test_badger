@@ -286,7 +286,7 @@ func TestDBCount(t *testing.T) {
 }
 
 func TestPrint(t *testing.T) {
-	proxyDB, err := proxy.CreateDBProxy("./data", nil)
+	proxyDB, err := proxy.CreateDBProxy(proxy.DefaultOptions("./data"))
 	require.NoError(t, err)
 	defer func() {
 		err := proxyDB.Close()

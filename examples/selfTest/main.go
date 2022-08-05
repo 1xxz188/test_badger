@@ -225,7 +225,7 @@ func fnBatchRead2(db *proxy.DBProxy, info *Collect, id int) error {
 	}
 	for _, item := range items {
 		if item.Err != nil {
-			logger.Log.Panicf("key[%s] %s", item.K, item.Err)
+			logger.Log.Fatalf("key[%s] %s", item.K, item.Err)
 		}
 	}
 	diffMS := time.Since(beginTm).Milliseconds()
@@ -359,7 +359,7 @@ func main() {
 	openTm := time.Now()
 	log.Printf("openTm[%d ms] dataLen[%d], lsmMaxValue[%d]\n", time.Since(openTm).Milliseconds(), dataLen, *lsmMaxValue)
 
-	proxyDB, err := proxy.CreateDBProxy("./data", nil)
+	proxyDB, err := proxy.CreateDBProxy(proxy.DefaultOptions("./data"))
 	if err != nil {
 		panic(err)
 	}
@@ -411,7 +411,7 @@ func main() {
 			forceDisable: false,
 		}
 		r.times.Init()*/
-		r := rateLimiter.NewBucket(time.Millisecond, 500)
+		r := rateLimiter.NewBucket(time.Millisecond, 500) //允许500个毫秒的突发抖动
 		log.Printf("limitStepCnt[%d] onlineNum[%d], curBeginId[%d] stepId[%d] stayTm[%s], rate[%d qps]", limitStepCnt, onlineNum, curBeginId, stepId, stayTm.String(), int(time.Second/time.Millisecond)*(*kSendLimit))
 
 		beginTm := time.Now()

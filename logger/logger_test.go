@@ -15,4 +15,5 @@ func TestLog(t *testing.T) {
 			time.Sleep(time.Second)
 		}
 	}
+
 }
