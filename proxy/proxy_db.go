@@ -36,9 +36,9 @@ type DBProxy struct {
 }
 
 type KV struct {
-	K   string
-	V   []byte
-	Err error
+	K   string `json:"key"`
+	V   []byte `json:"value"`
+	Err error  `json:"error"`
 }
 
 func CreateDBProxy(c *controlEXE.ControlEXE, dbDir string) (*DBProxy, error) {
@@ -269,7 +269,7 @@ func (proxy *DBProxy) GetCacheCnt() uint64 {
 }
 
 func (proxy *DBProxy) GetCachePenetrateRate() float64 {
-	return float64(proxy.GetCachePenetrateCnt() / proxy.GetCacheCnt())
+	return float64(proxy.GetCachePenetrateCnt()) / float64(proxy.GetCacheCnt())
 }
 
 func (proxy *DBProxy) get(txn *badger.Txn, key string) ([]byte, error) {

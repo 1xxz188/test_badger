@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"github.com/golang/groupcache/singleflight"
+	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/require"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"test_badger/cachedb"
@@ -272,4 +274,25 @@ func TestGoDo(t *testing.T) {
 	if got := atomic.LoadInt32(&calls); got != 1 {
 		t.Errorf("number of calls = %d; want 1", got)
 	}
+}
+
+func TestFloat(t *testing.T) {
+	a1 := uint64(123456)
+	a2 := uint64(1)
+	b := float64(a2) / float64(a1)
+
+	v, _ := decimal.NewFromFloat(b).Round(6).Float64()
+	value := strconv.FormatFloat(v, 'f', 6, 64)
+	fmt.Println(v, value) //9.81 被舍去
+
+	v1, _ := decimal.NewFromFloat(9.824).Round(2).Float64()
+	v2, _ := decimal.NewFromFloat(9.826).Round(2).Float64()
+	v3, _ := decimal.NewFromFloat(9.8251).Round(2).Float64()
+	fmt.Println(v1, v2, v3)
+}
+
+func TestByteFmt(t *testing.T) {
+	key := "key1"
+	v := []byte("you\\0me")
+	fmt.Println(fmt.Sprintf("{\"key\": \"%s\",\"value\":\"%s\"}", key, v))
 }

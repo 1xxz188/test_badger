@@ -46,11 +46,11 @@ import (
 )
 
 type KV struct {
-	K         string
-	V         []byte
-	Version   uint64
-	ExpiresAt uint64
-	UserMeta  byte
+	K         string `json:"key"`
+	V         []byte `json:"value"`
+	Version   uint64 `json:"version"`
+	ExpiresAt uint64 `json:"expiresAt"`
+	UserMeta  byte   `json:"userMeta"`
 }
 
 func DefaultOptions(path string) badger.Options {
@@ -88,7 +88,7 @@ func GetPreDBCount(db *badger.DB, prefix string) uint64 {
 	}
 	return count
 }
-func GetValue(db *badger.DB, key string) ([]byte, error) {
+func GetValue(db *badger.DB, key string) (*KV, error) {
 	txn := db.NewTransaction(false)
 	defer txn.Discard()
 
@@ -100,7 +100,13 @@ func GetValue(db *badger.DB, key string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return v, err
+	return &KV{
+		K:         key,
+		V:         v,
+		Version:   item.Version(),
+		UserMeta:  item.UserMeta(),
+		ExpiresAt: item.ExpiresAt(),
+	}, nil
 }
 
 // GetRange 指定范围迭代

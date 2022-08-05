@@ -1,22 +1,24 @@
 package web
 
 import (
+	"encoding/json"
 	"fmt"
 	"github.com/dgraph-io/ristretto"
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/gofiber/fiber/v2/middleware/limiter"
+	"github.com/shopspring/decimal"
 	"strconv"
 	"test_badger/badgerApi"
 	"test_badger/logger"
 	"test_badger/proxy"
-	"test_badger/util"
 	"time"
 )
 
 var thisProxy *proxy.DBProxy
 
 func RunWeb(listenAddr string, proxy *proxy.DBProxy) { //"0.0.0.0:4000"
+	thisProxy = proxy
 	app := fiber.New(fiber.Config{
 		EnablePrintRoutes: true,
 		ReadTimeout:       5 * time.Second,
@@ -34,20 +36,19 @@ func RunWeb(listenAddr string, proxy *proxy.DBProxy) { //"0.0.0.0:4000"
 		AllowOrigins: "*", //"*"允许从任何网页请求引用过来。或者具体限制从哪些网页过来 "https://gofiber.io, https://gofiber.net, http://127.0.0.1:4000"
 	}))
 
-	app.Get("/get/:key", getKey())                    //通过缓存读取
-	app.Get("/getDB/:key", getDBKey())                //直接拉取底层badger数据
-	app.Get("/getDB-range/:begin-:end", getDBRange()) //直接拉取底层badger数据
-	app.Get("/metrics", getMetrics)
+	app.Get("/get/:key", getKey())                   //指定查询, 通过缓存读取
+	app.Get("/getDB/:key", getDBKey())               //指定查询, 直接拉取底层badger数据
+	app.Get("/getDBRange/:begin-:end", getDBRange()) //范围查询,直接拉取底层badger数据
+	app.Get("/metrics", getMetrics)                  //指标统计信息
 
 	launchError := app.Listen(listenAddr)
 	if launchError != nil {
 		logger.Log.Fatal(launchError.Error())
 	}
-	thisProxy = proxy
 }
 
-func GetErr(errMsg string) string {
-	return "Err: " + errMsg
+func GetErr(err string) string {
+	return fmt.Sprintf("{\"error\":\"%s\"}", err)
 }
 
 func getDBKey() func(c *fiber.Ctx) error {
@@ -60,7 +61,12 @@ func getDBKey() func(c *fiber.Ctx) error {
 		if err != nil {
 			return c.SendString(GetErr(err.Error()))
 		}
-		return c.SendString(fmt.Sprintf("Key: %s\nValue:%s", c.Params("key"), v))
+
+		result, err := json.Marshal(v)
+		if err != nil {
+			return c.SendString(GetErr(err.Error()))
+		}
+		return c.Send(result)
 	}
 }
 func getKey() func(c *fiber.Ctx) error {
@@ -78,10 +84,12 @@ func getKey() func(c *fiber.Ctx) error {
 		if len(kv) != 1 {
 			return c.SendString(GetErr("server internal logic error"))
 		}
-		if kv[0].Err != nil {
-			return c.SendString(GetErr(kv[0].Err.Error()))
+
+		result, err := json.Marshal(kv[0])
+		if err != nil {
+			return c.SendString(GetErr(err.Error()))
 		}
-		return c.SendString(fmt.Sprintf("Key: %s\nValue:%s", key, kv[0].V))
+		return c.Send(result)
 	}
 }
 
@@ -109,14 +117,12 @@ func getDBRange() func(c *fiber.Ctx) error {
 			return c.SendString(GetErr(fmt.Sprintf("parameter begin[%d]-end[%d]=[%d] should be limited <= 1000", begin, end, diff)))
 		}
 
-		now := time.Now()
-		var result string
 		kvList := badgerApi.GetRange(thisProxy.DB, begin, end)
-		for i, kv := range kvList {
-			result += fmt.Sprintf("[%d] [version: %d]> %s: %s UserMeta[%d] expires_at[%d]\n", i+1, kv.Version, kv.K, util.ByteSliceToString(kv.V), kv.UserMeta, kv.ExpiresAt)
+		result, err := json.Marshal(kvList)
+		if err != nil {
+			return c.SendString(GetErr(err.Error()))
 		}
-		result += "Cost: " + time.Now().Sub(now).String()
-		return c.SendString(result)
+		return c.Send(result)
 	}
 }
 
@@ -125,7 +131,7 @@ func getMetrics(c *fiber.Ctx) error {
 		return c.SendString(GetErr("db not init"))
 	}
 
-	var result string
+	result := make(map[string]interface{}, 8)
 	analyze := func(name string, metrics *ristretto.Metrics) {
 		// If the mean life expectancy is less than 10 seconds, the cache
 		// might be too small.
@@ -137,19 +143,24 @@ func getMetrics(c *fiber.Ctx) error {
 		lifeTooShort := le.Count > 0 && float64(le.Sum)/float64(le.Count) < 10
 		hitRatioTooLow := metrics.Ratio() > 0 && metrics.Ratio() < 0.4
 		if lifeTooShort && hitRatioTooLow {
-			result += fmt.Sprintf("%s might be too small. Metrics: %s\n", name, metrics)
-			result += fmt.Sprintf("Cache life expectancy (in seconds): %+v\n", le)
+			result["warning"] = fmt.Sprintf("%s might be too small. Metrics: %s, Cache life expectancy (in seconds): %+v", name, metrics, le)
 		}
 
-		result += fmt.Sprintf("%s metrics: %s\n", name, metrics)
+		result[name] = metrics.String()
 	}
 
-	analyze("Block cache", thisProxy.DB.BlockCacheMetrics())
-	analyze("Index cache", thisProxy.DB.IndexCacheMetrics())
+	analyze("blockCache", thisProxy.DB.BlockCacheMetrics())
+	analyze("indexCache", thisProxy.DB.IndexCacheMetrics())
 
-	result += "Cache Cnt: " + strconv.FormatUint(thisProxy.GetCacheCnt(), 10)
-	result += "\nCache Penetrate Cnt: " + strconv.FormatUint(thisProxy.GetCachePenetrateCnt(), 10)
-	result += "\nCache PenetrateCnt Rate: " + strconv.FormatFloat(thisProxy.GetCachePenetrateRate(), 'g', 3, 32)
+	result["cacheCount"] = thisProxy.GetCacheCnt()
+	result["cachePenetrateCount"] = thisProxy.GetCachePenetrateCnt()
 
-	return c.SendString(result)
+	b, _ := decimal.NewFromFloat(thisProxy.GetCachePenetrateRate()).Round(6).Float64()
+	result["cachePenetrateCntRate"] = b //strconv.FormatFloat(b, 'f', 6, 64)
+
+	v, err := json.Marshal(result)
+	if err != nil {
+		return c.SendString(GetErr(err.Error()))
+	}
+	return c.Send(v)
 }

@@ -16,9 +16,9 @@ import (
 	"syscall"
 	"test_badger/badgerApi"
 	"test_badger/controlEXE"
+	"test_badger/logger"
 	"test_badger/proxy"
 	"test_badger/rateLimiter"
-	"test_badger/util"
 	"test_badger/web"
 	"time"
 )
@@ -160,7 +160,7 @@ func fnBatchRead(db *badger.DB, info *Collect, id int) error {
 	return nil
 }
 func fnBatchUpdate2(db *proxy.DBProxy, info *Collect, id int) error {
-	insertData := util.RandData(dataLen)
+	//insertData := util.RandData(dataLen)
 
 	keyList := append([]string(nil),
 		"Role_"+strconv.Itoa(10000000+id),
@@ -170,6 +170,7 @@ func fnBatchUpdate2(db *proxy.DBProxy, info *Collect, id int) error {
 		"Map_"+strconv.Itoa(10000000+id),
 	)
 
+	insertData := []byte(fmt.Sprintf("value_%d", info.setCount))
 	valueList := append([][]byte(nil),
 		insertData,
 		insertData,
@@ -227,7 +228,7 @@ func fnBatchRead2(db *proxy.DBProxy, info *Collect, id int) error {
 	}
 	for _, item := range items {
 		if item.Err != nil {
-			panic(item.Err)
+			logger.Log.Panicf("key[%s] %s", item.K, item.Err)
 		}
 	}
 	diffMS := time.Since(beginTm).Milliseconds()
