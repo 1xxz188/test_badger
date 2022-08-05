@@ -58,7 +58,7 @@ func getDBKey() func(c *fiber.Ctx) error {
 		if key == "" {
 			return c.SendString(GetErr("key parameter illegal"))
 		}
-		v, err := badgerApi.GetValue(thisProxy.DB, key)
+		v, err := thisProxy.GetDBValue(key)
 		if err != nil {
 			return c.SendString(GetErr(err.Error()))
 		}

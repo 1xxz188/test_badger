@@ -67,7 +67,23 @@ func CreateDBProxy(opt Opts) (*DBProxy, error) {
 		proxy.noSaveMap.Remove(key)
 		_ = proxy.DB.Update(func(txn *badger.Txn) error {
 			//fmt.Printf("warning save by remove key[%s] reason[%d]\n", key, reason)
-			return txn.Set([]byte(key), entry)
+			//TODO 优化不用解析直接判断是否过期
+			var kv badgerApi.KV
+			e := badger.NewEntry([]byte(key), entry)
+			err = proxy.serializer.Unmarshal(entry, &kv)
+			if err != nil {
+				panic(err)
+			}
+
+			if kv.ExpiresAt > 0 {
+				t := time.Unix(int64(kv.ExpiresAt), 0)
+				diffSec := time.Now().Sub(t).Seconds()
+				if diffSec < 1 {
+					return nil
+				}
+				e.WithTTL(time.Duration(diffSec) * time.Second)
+			}
+			return txn.SetEntry(e)
 		})
 	}
 
@@ -93,6 +109,7 @@ func CreateDBProxy(opt Opts) (*DBProxy, error) {
 			toSave := proxy.noSaveMap.Items()
 			snapshotMs := time.Since(now).Milliseconds()
 			now = time.Now()
+			var kv badgerApi.KV
 			for key := range toSave {
 				proxy.noSaveMap.Remove(key)
 				v, err = proxy.cache.Get(key)
@@ -101,7 +118,23 @@ func CreateDBProxy(opt Opts) (*DBProxy, error) {
 				}
 				// maxBatchCount int64 // max entries in batch    ---> 10w  MaxBatchSize()
 				// maxBatchSize  int64 // max batch size in bytes ---> 9.5MB MaxBatchSize()
-				err = wb.Set([]byte(key), v)
+				//err = wb.Set([]byte(key), v)
+				//TODO 优化不用解析直接判断是否过期
+				e := badger.NewEntry([]byte(key), v)
+				err = proxy.serializer.Unmarshal(v, &kv)
+				if err != nil {
+					panic(err)
+				}
+
+				if kv.ExpiresAt > 0 {
+					t := time.Unix(int64(kv.ExpiresAt), 0)
+					diffSec := now.Sub(t).Seconds()
+					if diffSec < 1 {
+						continue
+					}
+					e.WithTTL(time.Duration(diffSec) * time.Second)
+				}
+				err = wb.SetEntry(e)
 				if err != nil { //批量写入事务 内部已经处理了ErrTxnTooBig
 					panic(err)
 				}
@@ -140,6 +173,31 @@ func (proxy *DBProxy) Close() error {
 func (proxy *DBProxy) GetDBDir() string {
 	return proxy.dbDir
 }
+
+func (proxy *DBProxy) GetDBValue(key string) (*badgerApi.KV, error) {
+	txn := proxy.DB.NewTransaction(false)
+	defer txn.Discard()
+
+	item, err := txn.Get([]byte(key))
+	if err != nil {
+		return nil, err
+	}
+	v, err := item.ValueCopy(nil)
+	if err != nil {
+		return nil, err
+	}
+	var kv badgerApi.KV
+	err = proxy.serializer.Unmarshal(v, &kv)
+	if err != nil {
+		return nil, err
+	}
+	return &kv, nil
+}
+
+func (proxy *DBProxy) GetSerializer() serialize.Serializer {
+	return proxy.serializer
+}
+
 func (proxy *DBProxy) RunGC(gcRate float64) {
 	proxy.C.AllAdd(1)
 	defer proxy.C.AllDone()

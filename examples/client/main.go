@@ -44,6 +44,8 @@ func main() {
 
 	now := time.Now()
 	switch *op {
+	case "getDB":
+		fallthrough
 	case "get":
 		v, err := HttpGet(*url + *op + "/" + *v)
 		if err != nil {

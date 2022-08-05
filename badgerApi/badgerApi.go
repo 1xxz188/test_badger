@@ -86,24 +86,6 @@ func GetPreDBCount(db *badger.DB, prefix string) uint64 {
 	}
 	return count
 }
-func GetValue(db *badger.DB, key string) (*KV, error) {
-	txn := db.NewTransaction(false)
-	defer txn.Discard()
-
-	item, err := txn.Get([]byte(key))
-	if err != nil {
-		return nil, err
-	}
-	v, err := item.ValueCopy(nil)
-	if err != nil {
-		return nil, err
-	}
-	return &KV{
-		K:         key,
-		V:         v,
-		ExpiresAt: item.ExpiresAt(),
-	}, nil
-}
 
 // GetRange 指定范围迭代
 func GetRange(db *badger.DB, begin int, end int) (result []KV) {
