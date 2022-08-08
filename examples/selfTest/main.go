@@ -4,6 +4,7 @@ import (
 	"fmt"
 	badger "github.com/dgraph-io/badger/v3"
 	cmap "github.com/orcaman/concurrent-map"
+	"github.com/shopspring/decimal"
 	"gopkg.in/alecthomas/kingpin.v2"
 	"log"
 	"math/rand"
@@ -15,6 +16,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"test_badger/badgerApi"
+	"test_badger/customWatchKey"
 	"test_badger/logger"
 	"test_badger/proxy"
 	"test_badger/rateLimiter"
@@ -30,6 +32,8 @@ type Collect struct {
 	bigger100MsCount int64
 	bigger300MsCount int64
 	bigger1SecCount  int64
+	_                [8]byte //占位符
+	conflictsCount   int64   //版本冲突次数
 }
 
 func fnBatchUpdate(db *badger.DB, info *Collect, id int, dataLen int) error {
@@ -156,7 +160,8 @@ func fnBatchRead(db *badger.DB, info *Collect, id int) error {
 	info.setCount++
 	return nil
 }
-func fnBatchUpdate2(db *proxy.DBProxy, info *Collect, id int) error {
+
+func fnBatchUpdate2(db *proxy.Proxy, info *Collect, id int, version uint32, isCheckVersion bool) error {
 	//insertData := util.RandData(dataLen)
 	insertData := []byte(fmt.Sprintf("value_%d", info.setCount))
 	kvs := append([]badgerApi.KV(nil),
@@ -184,11 +189,23 @@ func fnBatchUpdate2(db *proxy.DBProxy, info *Collect, id int) error {
 
 	beginTm := time.Now()
 
-	//watchKey := "Watch_" + strconv.Itoa(10000000+id)
-	err := db.Sets("", kvs)
-	if err != nil {
-		return err
+	if isCheckVersion {
+		watchKey := "Watch_" + strconv.Itoa(10000000+id)
+		err := db.SetsByVersion(watchKey, version, kvs)
+		if err != nil {
+			if err == customWatchKey.ErrWatchVersionConflicts {
+				info.conflictsCount++
+			} else {
+				return err
+			}
+		}
+	} else {
+		err := db.Sets("", kvs)
+		if err != nil {
+			return err
+		}
 	}
+
 	diffMS := time.Since(beginTm).Milliseconds()
 	diffMic := time.Since(beginTm).Microseconds()
 	info.totalMic += diffMic
@@ -213,7 +230,7 @@ func fnBatchUpdate2(db *proxy.DBProxy, info *Collect, id int) error {
 	info.setCount++
 	return nil
 }
-func fnBatchRead2(db *proxy.DBProxy, info *Collect, id int) error {
+func fnBatchRead2(db *proxy.Proxy, info *Collect, id int) (uint32, error) { //return (version, err)
 	keyList := append([]string(nil),
 		"Role_"+strconv.Itoa(10000000+id),
 		"Item_"+strconv.Itoa(10000000+id),
@@ -225,7 +242,7 @@ func fnBatchRead2(db *proxy.DBProxy, info *Collect, id int) error {
 	watchKey := "Watch_" + strconv.Itoa(10000000+id)
 	beginTm := time.Now()
 
-	items, _ := db.Gets(watchKey, keyList)
+	items, version := db.Gets(watchKey, keyList)
 	if len(items) != len(keyList) {
 		panic("len(items) != len(keyList)")
 	}
@@ -256,11 +273,11 @@ func fnBatchRead2(db *proxy.DBProxy, info *Collect, id int) error {
 		}
 	}
 	info.setCount++
-	return nil
+	return version, nil
 }
 
 //work 处理数据
-func work(proxyDB *proxy.DBProxy, coroutines int, op string, chId chan int, totalSendCnt *int64) {
+func work(proxyDB *proxy.Proxy, coroutines int, op string, chId chan int, totalSendCnt *int64) {
 	for i := 0; i < coroutines; i++ {
 		proxyDB.C.ProducerAdd(1)
 		go func(sendId int) {
@@ -279,8 +296,13 @@ func work(proxyDB *proxy.DBProxy, coroutines int, op string, chId chan int, tota
 					select {
 					case <-ticker.C:
 						if updateInfo.setCount > 0 {
-							log.Printf("[%d]updateInfo> sendCnt[%d] avg[%d us] max[%d ms] >=10ms[%d] >=100ms[%d] >=300ms[%d] >=1000ms[%d]\n",
-								sendId, updateInfo.setCount, updateInfo.totalMic/updateInfo.setCount, updateInfo.maxMs, updateInfo.bigger10MsCount, updateInfo.bigger100MsCount, updateInfo.bigger300MsCount, updateInfo.bigger1SecCount)
+							var b float64
+							if updateInfo.conflictsCount > 0 {
+								b, _ = decimal.NewFromFloat(float64(updateInfo.conflictsCount) / float64(updateInfo.setCount)).Round(6).Float64()
+							}
+
+							log.Printf("[%d]updateInfo> sendCnt[%d]-conflicts[%d] conflictsRate[%f] avg[%d us] max[%d ms] >=10ms[%d] >=100ms[%d] >=300ms[%d] >=1000ms[%d]\n",
+								sendId, updateInfo.setCount, updateInfo.conflictsCount, b, updateInfo.totalMic/updateInfo.setCount, updateInfo.maxMs, updateInfo.bigger10MsCount, updateInfo.bigger100MsCount, updateInfo.bigger300MsCount, updateInfo.bigger1SecCount)
 						}
 
 						if getInfo.setCount > 0 {
@@ -295,30 +317,37 @@ func work(proxyDB *proxy.DBProxy, coroutines int, op string, chId chan int, tota
 
 			if op == "insert" || op == "set" {
 				for id := range chId {
-					if err := fnBatchUpdate2(proxyDB, &updateInfo, id); err != nil {
+					if err := fnBatchUpdate2(proxyDB, &updateInfo, id, 0, false); err != nil {
 						panic(err)
 					}
 				}
 			} else if op == "get" {
 				for id := range chId {
-					if err := fnBatchRead2(proxyDB, &getInfo, id); err != nil {
+					if _, err := fnBatchRead2(proxyDB, &getInfo, id); err != nil {
 						panic(err)
 					}
 				}
 			} else {
 				for id := range chId {
-					if err := fnBatchRead2(proxyDB, &getInfo, id); err != nil {
+					version, err := fnBatchRead2(proxyDB, &getInfo, id)
+					if err != nil {
 						panic(err)
 					}
-					if err := fnBatchUpdate2(proxyDB, &updateInfo, id); err != nil {
-						panic(err)
+					//fmt.Printf("sendId[%d] read id: %d, version: %d\n", sendId, id, version)
+					if err := fnBatchUpdate2(proxyDB, &updateInfo, id, version, true); err != nil {
+						panic(fmt.Sprintf("sendId[%d] err: %s, id: %d, version: %d", sendId, err, id, version))
 					}
 				}
 			}
 
 			if updateInfo.setCount > 0 {
-				log.Printf("[%d]updateInfo> over sendCnt[%d] avg[%d us] max[%d ms] >=10ms[%d] >=100ms[%d] >=300ms[%d] >=1000ms[%d]\n",
-					sendId, updateInfo.setCount, updateInfo.totalMic/updateInfo.setCount, updateInfo.maxMs, updateInfo.bigger10MsCount, updateInfo.bigger100MsCount, updateInfo.bigger300MsCount, updateInfo.bigger1SecCount)
+				var b float64
+				if updateInfo.conflictsCount > 0 {
+					b, _ = decimal.NewFromFloat(float64(updateInfo.conflictsCount) / float64(updateInfo.setCount)).Round(6).Float64()
+				}
+
+				log.Printf("[%d]updateInfo> over sendCnt[%d]-conflicts[%d] conflictsRate[%f] avg[%d us] max[%d ms] >=10ms[%d] >=100ms[%d] >=300ms[%d] >=1000ms[%d]\n",
+					sendId, updateInfo.setCount, updateInfo.conflictsCount, b, updateInfo.totalMic/updateInfo.setCount, updateInfo.maxMs, updateInfo.bigger10MsCount, updateInfo.bigger100MsCount, updateInfo.bigger300MsCount, updateInfo.bigger1SecCount)
 			}
 			if getInfo.setCount > 0 {
 				log.Printf("[%d]getInfo> over sendCnt[%d] avg[%d us] max[%d ms] >=10ms[%d] >=100ms[%d] >=300ms[%d] >=1000ms[%d]\n",
@@ -474,9 +503,9 @@ func main() {
 			proxyDB.C.CTXCancel()
 		}()
 	case "get-set":
-		go sendFn()
+		fallthrough
 	case "get":
-		go sendFn()
+		fallthrough
 	case "set":
 		go sendFn()
 	default:

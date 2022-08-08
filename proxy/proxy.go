@@ -24,7 +24,7 @@ type GcInfo struct {
 	GCRunOKCnt int64
 }
 
-type DBProxy struct {
+type Proxy struct {
 	C                 *controlEXE.ControlEXE //协程生命周期控制器(生产消息协程,消费协程,GC协程)
 	DB                *badger.DB             //底层数据
 	GCInfo            GcInfo
@@ -38,7 +38,7 @@ type DBProxy struct {
 	serializer        serialize.Serializer
 }
 
-func CreateDBProxy(opt Opts) (*DBProxy, error) {
+func CreateDBProxy(opt Opts) (*Proxy, error) {
 	db, err := badger.Open(opt.optBadger)
 	if err != nil {
 		return nil, err
@@ -48,7 +48,7 @@ func CreateDBProxy(opt Opts) (*DBProxy, error) {
 	if err != nil {
 		return nil, err
 	}
-	proxy := &DBProxy{
+	proxy := &Proxy{
 		DB:          db,
 		C:           opt.c,
 		cache:       opt.cache,
@@ -167,18 +167,18 @@ func CreateDBProxy(opt Opts) (*DBProxy, error) {
 
 	return proxy, nil
 }
-func (proxy *DBProxy) Close() error {
+func (proxy *Proxy) Close() error {
 	proxy.C.ProducerWait() //等待生产消息退出
 	proxy.C.ConsumerWait() //等待数据落地
 	proxy.C.AllWait()      //等待GC结束
 	log.Println("main() exit!!!")
 	return proxy.DB.Close()
 }
-func (proxy *DBProxy) GetDBDir() string {
+func (proxy *Proxy) GetDBDir() string {
 	return proxy.dbDir
 }
 
-func (proxy *DBProxy) GetDBValue(key string) (*badgerApi.KV, error) {
+func (proxy *Proxy) GetDBValue(key string) (*badgerApi.KV, error) {
 	txn := proxy.DB.NewTransaction(false)
 	defer txn.Discard()
 
@@ -198,11 +198,11 @@ func (proxy *DBProxy) GetDBValue(key string) (*badgerApi.KV, error) {
 	return &kv, nil
 }
 
-func (proxy *DBProxy) GetSerializer() serialize.Serializer {
+func (proxy *Proxy) GetSerializer() serialize.Serializer {
 	return proxy.serializer
 }
 
-func (proxy *DBProxy) RunGC(gcRate float64) {
+func (proxy *Proxy) RunGC(gcRate float64) {
 	proxy.C.AllAdd(1)
 	defer proxy.C.AllDone()
 
@@ -307,19 +307,23 @@ func (proxy *DBProxy) RunGC(gcRate float64) {
 	}
 }
 
-func (proxy *DBProxy) GetCachePenetrateCnt() uint64 {
+func (proxy *Proxy) GetCachePenetrateCnt() uint64 {
 	return atomic.LoadUint64(&proxy.cachePenetrateCnt)
 }
 
-func (proxy *DBProxy) GetCacheCnt() uint64 {
+func (proxy *Proxy) GetCacheCnt() uint64 {
 	return atomic.LoadUint64(&proxy.cacheCnt)
 }
 
-func (proxy *DBProxy) GetCachePenetrateRate() float64 {
+func (proxy *Proxy) GetCachePenetrateRate() float64 {
+	f := float64(proxy.GetCacheCnt())
+	if f == 0 {
+		return 0
+	}
 	return float64(proxy.GetCachePenetrateCnt()) / float64(proxy.GetCacheCnt())
 }
 
-func (proxy *DBProxy) get(txn *badger.Txn, key string) *badgerApi.KV {
+func (proxy *Proxy) get(txn *badger.Txn, key string) *badgerApi.KV {
 	data, err := proxy.cache.Get(key)
 	//TODO 考虑池化kv对象
 	var kv badgerApi.KV
@@ -367,7 +371,7 @@ func (proxy *DBProxy) get(txn *badger.Txn, key string) *badgerApi.KV {
 	return &kv
 }
 
-func (proxy *DBProxy) Gets(watchKey string, keys []string) (result []*badgerApi.KV, version uint32) {
+func (proxy *Proxy) Gets(watchKey string, keys []string) (result []*badgerApi.KV, version uint32) {
 	if len(watchKey) != 0 {
 		_ = proxy.watchKeyMgr.Read(watchKey, func(keyVersion uint32) error {
 			version = keyVersion
@@ -390,7 +394,7 @@ func (proxy *DBProxy) Gets(watchKey string, keys []string) (result []*badgerApi.
 		return result, 0
 	}
 }
-func (proxy *DBProxy) set(kv *badgerApi.KV) error {
+func (proxy *Proxy) set(kv *badgerApi.KV) error {
 	v, err := proxy.serializer.Marshal(kv)
 	if err != nil {
 		return err
@@ -403,7 +407,7 @@ func (proxy *DBProxy) set(kv *badgerApi.KV) error {
 }
 
 // Sets TODO 改protobuf结构参数
-func (proxy *DBProxy) Sets(watchKey string, kvs []badgerApi.KV) error {
+func (proxy *Proxy) Sets(watchKey string, kvs []badgerApi.KV) error {
 	if len(watchKey) != 0 {
 		return proxy.watchKeyMgr.Write(watchKey, 0, false, func(keyVersion uint32) error {
 			for i := 0; i < len(kvs); i++ {
@@ -425,7 +429,8 @@ func (proxy *DBProxy) Sets(watchKey string, kvs []badgerApi.KV) error {
 	}
 }
 
-func (proxy *DBProxy) SetsByVersion(watchKey string, keyVersion uint32, kvs []badgerApi.KV) error {
+// SetsByVersion 注意: keyVersion为0也是有效版本,因为允许翻转
+func (proxy *Proxy) SetsByVersion(watchKey string, keyVersion uint32, kvs []badgerApi.KV) error {
 	return proxy.watchKeyMgr.Write(watchKey, keyVersion, true, func(keyVersion uint32) error {
 		for i := 0; i < len(kvs); i++ {
 			err := proxy.set(&kvs[i])

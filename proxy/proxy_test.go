@@ -130,7 +130,7 @@ func TestSave(t *testing.T) {
 		panic("len(items) != len(keyList)")
 	}
 	for _, item := range items {
-		require.Error(t, item.Err)
+		require.Equal(t, true, len(item.Err) != 0)
 	}
 
 	setCnt := uint32(0)

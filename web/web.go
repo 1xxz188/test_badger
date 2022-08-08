@@ -16,9 +16,9 @@ import (
 	"time"
 )
 
-var thisProxy *proxy.DBProxy
+var thisProxy *proxy.Proxy
 
-func RunWeb(listenAddr string, proxy *proxy.DBProxy) { //"0.0.0.0:4000"
+func RunWeb(listenAddr string, proxy *proxy.Proxy) { //"0.0.0.0:4000"
 	thisProxy = proxy
 	app := fiber.New(fiber.Config{
 		EnablePrintRoutes: true,
