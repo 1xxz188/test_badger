@@ -1,17 +1,18 @@
 package web
 
 import (
-	"encoding/json"
 	"fmt"
 	"github.com/dgraph-io/ristretto"
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/gofiber/fiber/v2/middleware/limiter"
+	json "github.com/json-iterator/go"
 	"github.com/shopspring/decimal"
 	"strconv"
 	"test_badger/badgerApi"
 	"test_badger/logger"
 	"test_badger/proxy"
+	"test_badger/util"
 	"time"
 )
 
@@ -48,92 +49,131 @@ func RunWeb(listenAddr string, proxy *proxy.DBProxy) { //"0.0.0.0:4000"
 	}
 }
 
-func GetErr(err string) string {
-	return fmt.Sprintf("{\"error\":\"%s\"}", err)
-}
-
 func getDBKey() func(c *fiber.Ctx) error {
 	return func(c *fiber.Ctx) error {
 		key := c.Params("key")
+		resp := badgerApi.KV{
+			K: key,
+		}
+		fnResp := func(errMsg string) []byte {
+			resp.Err = errMsg
+			result, err := json.Marshal(resp)
+			if err != nil {
+				return util.StringToByteSlice("json.Marshal error")
+			}
+			return result
+		}
 		if key == "" {
-			return c.SendString(GetErr("key parameter illegal"))
+			return c.Send(fnResp("key parameter illegal"))
 		}
 		v, err := thisProxy.GetDBValue(key)
 		if err != nil {
-			return c.SendString(GetErr(err.Error()))
+			return c.Send(fnResp(err.Error()))
 		}
-
-		result, err := json.Marshal(v)
-		if err != nil {
-			return c.SendString(GetErr(err.Error()))
-		}
-		return c.Send(result)
+		resp = *v
+		return c.Send(fnResp(resp.Err))
 	}
 }
 func getKey() func(c *fiber.Ctx) error {
 	return func(c *fiber.Ctx) error {
-		if thisProxy == nil {
-			return c.SendString(GetErr("db not init"))
+		key := c.Params("key")
+		resp := badgerApi.KV{
+			K: key,
+		}
+		fnResp := func(errMsg string) []byte {
+			resp.Err = errMsg
+			result, err := json.Marshal(resp)
+			if err != nil {
+				return util.StringToByteSlice("json.Marshal error")
+			}
+			return result
 		}
 
-		key := c.Params("key")
 		if key == "" {
-			return c.SendString(GetErr("key parameter illegal"))
+			return c.Send(fnResp("key parameter illegal"))
+		}
+
+		if thisProxy == nil {
+			return c.Send(fnResp("db not init"))
 		}
 
 		kv, _ := thisProxy.Gets("", []string{key})
 		if len(kv) != 1 {
-			return c.SendString(GetErr("server internal logic error"))
+			return c.Send(fnResp("server internal logic error"))
 		}
-
-		result, err := json.Marshal(kv[0])
-		if err != nil {
-			return c.SendString(GetErr(err.Error()))
-		}
-		return c.Send(result)
+		resp = *kv[0]
+		return c.Send(fnResp(resp.Err))
 	}
 }
 
 func getDBRange() func(c *fiber.Ctx) error {
 	return func(c *fiber.Ctx) error {
+		type KVList struct {
+			Result []badgerApi.KV `json:"kvList"`
+			Err    string         `json:"error"`
+		}
+		resp := KVList{}
+		fnResp := func(errMsg string) []byte {
+			resp.Err = errMsg
+			result, err := json.Marshal(resp)
+			if err != nil {
+				return util.StringToByteSlice("json.Marshal error")
+			}
+			return result
+		}
 		if thisProxy == nil {
-			return c.SendString(GetErr("db not init"))
+			return c.Send(fnResp("db not init"))
 		}
 		begin, err := strconv.Atoi(c.Params("begin"))
 		if err != nil {
-			return c.SendString(GetErr(err.Error()))
+			return c.Send(fnResp(err.Error()))
 		}
 		end, err := strconv.Atoi(c.Params("end"))
 		if err != nil {
-			return c.SendString(GetErr(err.Error()))
+			return c.Send(fnResp(err.Error()))
 		}
 		if begin < 0 || end < 0 {
-			return c.SendString(GetErr("parameter err: begin < 0 || end < 0"))
+			return c.Send(fnResp("parameter err: begin < 0 || end < 0"))
 		}
 		if begin > end {
-			return c.SendString(GetErr(fmt.Sprintf("parameter begin[%d] > end[%d]", begin, end)))
+			return c.Send(fnResp(fmt.Sprintf("parameter begin[%d] > end[%d]", begin, end)))
 		}
 		diff := end - begin
 		if diff > 1000 {
-			return c.SendString(GetErr(fmt.Sprintf("parameter begin[%d]-end[%d]=[%d] should be limited <= 1000", begin, end, diff)))
+			return c.Send(fnResp(fmt.Sprintf("parameter begin[%d]-end[%d]=[%d] should be limited <= 1000", begin, end, diff)))
 		}
 
-		kvList := badgerApi.GetRange(thisProxy.DB, begin, end)
-		result, err := json.Marshal(kvList)
-		if err != nil {
-			return c.SendString(GetErr(err.Error()))
-		}
-		return c.Send(result)
+		resp.Result = badgerApi.GetRange(thisProxy.DB, begin, end)
+		return c.Send(fnResp(""))
 	}
 }
 
 func getMetrics(c *fiber.Ctx) error {
-	if thisProxy == nil {
-		return c.SendString(GetErr("db not init"))
+	type Metrics struct {
+		Warning               string  `json:"warning"`
+		BlockCache            string  `json:"blockCache"`
+		IndexCache            string  `json:"indexCache"`
+		Err                   string  `json:"error"`
+		CacheCount            uint64  `json:"cacheCount"`
+		CachePenetrateCount   uint64  `json:"cachePenetrateCount"`
+		CachePenetrateCntRate float64 `json:"cachePenetrateCntRate"`
 	}
 
-	result := make(map[string]interface{}, 8)
-	analyze := func(name string, metrics *ristretto.Metrics) {
+	resp := Metrics{}
+	fnResp := func(errMsg string) []byte {
+		resp.Err = errMsg
+		result, err := json.Marshal(resp)
+		if err != nil {
+			return util.StringToByteSlice("json.Marshal error")
+		}
+		return result
+	}
+
+	if thisProxy == nil {
+		return c.Send(fnResp("db not init"))
+	}
+
+	analyze := func(name *string, metrics *ristretto.Metrics) {
 		// If the mean life expectancy is less than 10 seconds, the cache
 		// might be too small.
 		le := metrics.LifeExpectancySeconds()
@@ -144,24 +184,19 @@ func getMetrics(c *fiber.Ctx) error {
 		lifeTooShort := le.Count > 0 && float64(le.Sum)/float64(le.Count) < 10
 		hitRatioTooLow := metrics.Ratio() > 0 && metrics.Ratio() < 0.4
 		if lifeTooShort && hitRatioTooLow {
-			result["warning"] = fmt.Sprintf("%s might be too small. Metrics: %s, Cache life expectancy (in seconds): %+v", name, metrics, le)
+			resp.Warning = fmt.Sprintf("%s might be too small. Metrics: %s, Cache life expectancy (in seconds): %+v", *name, metrics, le)
 		}
 
-		result[name] = metrics.String()
+		*name = metrics.String()
 	}
 
-	analyze("blockCache", thisProxy.DB.BlockCacheMetrics())
-	analyze("indexCache", thisProxy.DB.IndexCacheMetrics())
+	analyze(&resp.BlockCache, thisProxy.DB.BlockCacheMetrics())
+	analyze(&resp.IndexCache, thisProxy.DB.IndexCacheMetrics())
 
-	result["cacheCount"] = thisProxy.GetCacheCnt()
-	result["cachePenetrateCount"] = thisProxy.GetCachePenetrateCnt()
+	resp.CacheCount = thisProxy.GetCacheCnt()
+	resp.CachePenetrateCount = thisProxy.GetCachePenetrateCnt()
 
 	b, _ := decimal.NewFromFloat(thisProxy.GetCachePenetrateRate()).Round(6).Float64()
-	result["cachePenetrateCntRate"] = b //strconv.FormatFloat(b, 'f', 6, 64)
-
-	v, err := json.Marshal(result)
-	if err != nil {
-		return c.SendString(GetErr(err.Error()))
-	}
-	return c.Send(v)
+	resp.CachePenetrateCntRate = b //strconv.FormatFloat(b, 'f', 6, 64)
+	return c.Send(fnResp(""))
 }

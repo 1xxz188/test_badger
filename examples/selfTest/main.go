@@ -230,7 +230,7 @@ func fnBatchRead2(db *proxy.DBProxy, info *Collect, id int) error {
 		panic("len(items) != len(keyList)")
 	}
 	for _, item := range items {
-		if item.Err != nil {
+		if item.Err != "" {
 			logger.Log.Fatalf("id[%d] key[%s] %s", id, item.K, item.Err)
 		}
 	}
@@ -350,7 +350,7 @@ func main() {
 	kSendLimit := kingpin.Flag("sendLimit", "[get-set] send count for per ms").Default("1").Int()
 
 	kPprof := kingpin.Flag("pprof", "ip:port of pprof listen addr").Default("0.0.0.0:11000").String()
-	kWebAddr := kingpin.Flag("web", "ip:port of web listen addr").Default("0.0.0.0:11001").String()
+	kWebAddr := kingpin.Flag("web", "ip:port of web listen addr").Default("0.0.0.0:11002").String()
 
 	kingpin.HelpFlag.Short('h')
 	kingpin.Version("v0.0.1")
@@ -384,7 +384,7 @@ func main() {
 	//开启网页查询
 	go web.RunWeb(*kWebAddr, proxyDB)
 
-	chId := make(chan int, 1024*20)
+	chId := make(chan int, 1024*80)
 	totalSendCnt := int64(0)
 	isClose := false
 

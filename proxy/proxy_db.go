@@ -65,8 +65,11 @@ func CreateDBProxy(opt Opts) (*DBProxy, error) {
 			return
 		}
 		proxy.noSaveMap.Remove(key)
+
+		//TODO 添加记录日志。程序能进入到这里，说明定时保存的速度已不够(生产速度大于消费速度)。需要添加内存上限，或者优化程序，提高解码效率
+		fmt.Printf("warning save by remove key[%s]\n", key)
+
 		_ = proxy.DB.Update(func(txn *badger.Txn) error {
-			//fmt.Printf("warning save by remove key[%s] reason[%d]\n", key, reason)
 			//TODO 优化不用解析直接判断是否过期
 			var kv badgerApi.KV
 			e := badger.NewEntry([]byte(key), entry)
@@ -97,6 +100,7 @@ func CreateDBProxy(opt Opts) (*DBProxy, error) {
 		var v []byte
 		var err error
 
+		//定时保存函数
 		saveData := func() {
 			if proxy.noSaveMap.Count() <= 0 {
 				return
@@ -317,18 +321,19 @@ func (proxy *DBProxy) GetCachePenetrateRate() float64 {
 
 func (proxy *DBProxy) get(txn *badger.Txn, key string) *badgerApi.KV {
 	data, err := proxy.cache.Get(key)
+	//TODO 考虑池化kv对象
 	var kv badgerApi.KV
 	kv.K = key
 	if err == nil {
 		atomic.AddUint64(&proxy.cacheCnt, 1)
 		err := proxy.serializer.Unmarshal(data, &kv)
 		if err != nil {
-			kv.Err = err
+			kv.Err = err.Error()
 		}
 		return &kv //命中缓存返回数据
 	}
 	if err != cachedb.ErrEntryNotFound {
-		kv.Err = err
+		kv.Err = err.Error()
 		return &kv
 	}
 
@@ -337,27 +342,27 @@ func (proxy *DBProxy) get(txn *badger.Txn, key string) *badgerApi.KV {
 	//穿透到badger
 	item, err := txn.Get([]byte(key))
 	if err != nil {
-		kv.Err = err
+		kv.Err = err.Error()
 		if err == badger.ErrKeyNotFound { //转换错误
-			kv.Err = cachedb.ErrEntryNotFound
+			kv.Err = cachedb.ErrEntryNotFound.Error()
 		}
 		return &kv
 	}
 	v, err := item.ValueCopy(nil)
 	if err != nil {
-		kv.Err = err
+		kv.Err = err.Error()
 		return &kv
 	}
 
 	//更新到缓存中
 	err = proxy.cache.Set(key, v)
 	if err != nil {
-		kv.Err = err
+		kv.Err = err.Error()
 		return &kv
 	}
 	err = proxy.serializer.Unmarshal(v, &kv)
 	if err != nil {
-		kv.Err = err
+		kv.Err = err.Error()
 	}
 	return &kv
 }

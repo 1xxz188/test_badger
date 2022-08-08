@@ -48,7 +48,7 @@ type KV struct {
 	K         string `json:"key"`
 	V         []byte `json:"value"`
 	ExpiresAt uint64 `json:"expiresAt"`
-	Err       error  `json:"error"`
+	Err       string `json:"error"`
 }
 
 func DefaultOptions(path string) badger.Options {
