@@ -63,7 +63,8 @@ func DoGet(reqUrl string) {
 		fmt.Println(kv.Err)
 		return
 	}
-	fmt.Printf("%s, %s\n", kv.K, string(kv.V))
+	vv := kv.V[0:19]
+	fmt.Printf("[%d](%s,%s)\n", len(kv.V), kv.K, string(vv))
 }
 
 func DoGetRange(reqUrl string) {

@@ -20,6 +20,7 @@ import (
 	"test_badger/logger"
 	"test_badger/proxy"
 	"test_badger/rateLimiter"
+	"test_badger/util"
 	"test_badger/web"
 	"time"
 )
@@ -32,8 +33,8 @@ type Collect struct {
 	bigger100MsCount int64
 	bigger300MsCount int64
 	bigger1SecCount  int64
-	_                [8]byte //占位符
-	conflictsCount   int64   //版本冲突次数
+	conflictsCount   int64 //版本冲突次数
+	maxRetryCount    int64
 }
 
 func fnBatchUpdate(db *badger.DB, info *Collect, id int, dataLen int) error {
@@ -161,9 +162,10 @@ func fnBatchRead(db *badger.DB, info *Collect, id int) error {
 	return nil
 }
 
-func fnBatchUpdate2(db *proxy.Proxy, info *Collect, id int, version uint32, isCheckVersion bool) error {
-	//insertData := util.RandData(dataLen)
-	insertData := []byte(fmt.Sprintf("value_%d", info.setCount))
+func fnBatchUpdate2(db *proxy.Proxy, info *Collect, id int, dataLen int, version uint32, isCheckVersion bool) error {
+	insertData := util.RandData(dataLen)
+	flagData := []byte(fmt.Sprintf("value_%d", info.setCount))
+	copy(insertData[0:len(flagData)], flagData)
 	kvs := append([]badgerApi.KV(nil),
 		badgerApi.KV{
 			K: "Role_" + strconv.Itoa(10000000+id),
@@ -193,11 +195,7 @@ func fnBatchUpdate2(db *proxy.Proxy, info *Collect, id int, version uint32, isCh
 		watchKey := "Watch_" + strconv.Itoa(10000000+id)
 		err := db.SetsByVersion(watchKey, version, kvs)
 		if err != nil {
-			if err == customWatchKey.ErrWatchVersionConflicts {
-				info.conflictsCount++
-			} else {
-				return err
-			}
+			return err
 		}
 	} else {
 		err := db.Sets("", kvs)
@@ -277,7 +275,7 @@ func fnBatchRead2(db *proxy.Proxy, info *Collect, id int) (uint32, error) { //re
 }
 
 //work 处理数据
-func work(proxyDB *proxy.Proxy, coroutines int, op string, chId chan int, totalSendCnt *int64) {
+func work(proxyDB *proxy.Proxy, coroutines int, op string, chId chan int, dataLen int, totalSendCnt *int64) {
 	for i := 0; i < coroutines; i++ {
 		proxyDB.C.ProducerAdd(1)
 		go func(sendId int) {
@@ -301,8 +299,8 @@ func work(proxyDB *proxy.Proxy, coroutines int, op string, chId chan int, totalS
 								b, _ = decimal.NewFromFloat(float64(updateInfo.conflictsCount) / float64(updateInfo.setCount)).Round(6).Float64()
 							}
 
-							log.Printf("[%d]updateInfo> sendCnt[%d]-conflicts[%d] conflictsRate[%f] avg[%d us] max[%d ms] >=10ms[%d] >=100ms[%d] >=300ms[%d] >=1000ms[%d]\n",
-								sendId, updateInfo.setCount, updateInfo.conflictsCount, b, updateInfo.totalMic/updateInfo.setCount, updateInfo.maxMs, updateInfo.bigger10MsCount, updateInfo.bigger100MsCount, updateInfo.bigger300MsCount, updateInfo.bigger1SecCount)
+							log.Printf("[%d]updateInfo> sendCnt[%d]-conflicts[%d] conflictsRate[%f] maxRetryCount[%d] avg[%d us] max[%d ms] >=10ms[%d] >=100ms[%d] >=300ms[%d] >=1000ms[%d]\n",
+								sendId, updateInfo.setCount, updateInfo.conflictsCount, b, updateInfo.maxRetryCount, updateInfo.totalMic/updateInfo.setCount, updateInfo.maxMs, updateInfo.bigger10MsCount, updateInfo.bigger100MsCount, updateInfo.bigger300MsCount, updateInfo.bigger1SecCount)
 						}
 
 						if getInfo.setCount > 0 {
@@ -317,7 +315,7 @@ func work(proxyDB *proxy.Proxy, coroutines int, op string, chId chan int, totalS
 
 			if op == "insert" || op == "set" {
 				for id := range chId {
-					if err := fnBatchUpdate2(proxyDB, &updateInfo, id, 0, false); err != nil {
+					if err := fnBatchUpdate2(proxyDB, &updateInfo, id, dataLen, 0, false); err != nil {
 						panic(err)
 					}
 				}
@@ -328,15 +326,30 @@ func work(proxyDB *proxy.Proxy, coroutines int, op string, chId chan int, totalS
 					}
 				}
 			} else {
+				retryCount := int64(0)
 				for id := range chId {
-					version, err := fnBatchRead2(proxyDB, &getInfo, id)
-					if err != nil {
-						panic(err)
+					retryCount = 0
+					for {
+						version, err := fnBatchRead2(proxyDB, &getInfo, id)
+						if err != nil {
+							panic(err)
+						}
+						//fmt.Printf("sendId[%d] read id: %d, version: %d\n", sendId, id, version)
+						if err := fnBatchUpdate2(proxyDB, &updateInfo, id, dataLen, version, true); err != nil {
+							if err == customWatchKey.ErrWatchVersionConflicts {
+								updateInfo.conflictsCount++
+								retryCount++
+								if retryCount > updateInfo.maxRetryCount { //此次测试应许无限次重试
+									updateInfo.maxRetryCount = retryCount
+								}
+								continue
+							} else {
+								panic(fmt.Sprintf("sendId[%d] err: %s, id: %d, version: %d", sendId, err, id, version))
+							}
+						}
+						break
 					}
-					//fmt.Printf("sendId[%d] read id: %d, version: %d\n", sendId, id, version)
-					if err := fnBatchUpdate2(proxyDB, &updateInfo, id, version, true); err != nil {
-						panic(fmt.Sprintf("sendId[%d] err: %s, id: %d, version: %d", sendId, err, id, version))
-					}
+
 				}
 			}
 
@@ -346,8 +359,8 @@ func work(proxyDB *proxy.Proxy, coroutines int, op string, chId chan int, totalS
 					b, _ = decimal.NewFromFloat(float64(updateInfo.conflictsCount) / float64(updateInfo.setCount)).Round(6).Float64()
 				}
 
-				log.Printf("[%d]updateInfo> over sendCnt[%d]-conflicts[%d] conflictsRate[%f] avg[%d us] max[%d ms] >=10ms[%d] >=100ms[%d] >=300ms[%d] >=1000ms[%d]\n",
-					sendId, updateInfo.setCount, updateInfo.conflictsCount, b, updateInfo.totalMic/updateInfo.setCount, updateInfo.maxMs, updateInfo.bigger10MsCount, updateInfo.bigger100MsCount, updateInfo.bigger300MsCount, updateInfo.bigger1SecCount)
+				log.Printf("[%d]updateInfo> over sendCnt[%d]-conflicts[%d] conflictsRate[%f] maxRetryCount[%d] avg[%d us] max[%d ms] >=10ms[%d] >=100ms[%d] >=300ms[%d] >=1000ms[%d]\n",
+					sendId, updateInfo.setCount, updateInfo.conflictsCount, b, updateInfo.maxRetryCount, updateInfo.totalMic/updateInfo.setCount, updateInfo.maxMs, updateInfo.bigger10MsCount, updateInfo.bigger100MsCount, updateInfo.bigger300MsCount, updateInfo.bigger1SecCount)
 			}
 			if getInfo.setCount > 0 {
 				log.Printf("[%d]getInfo> over sendCnt[%d] avg[%d us] max[%d ms] >=10ms[%d] >=100ms[%d] >=300ms[%d] >=1000ms[%d]\n",
@@ -385,7 +398,7 @@ func main() {
 	kingpin.Version("v0.0.1")
 	kingpin.Parse()
 
-	if *dataSize <= 0 {
+	if *dataSize <= 64 {
 		panic("dataSize should be >= 0")
 	}
 	dataLen := *dataSize
@@ -418,7 +431,7 @@ func main() {
 	isClose := false
 
 	//消费协程
-	work(proxyDB, *coroutines, *op, chId, &totalSendCnt)
+	work(proxyDB, *coroutines, *op, chId, dataLen, &totalSendCnt)
 
 	//生产协程
 	sendFn := func() {
@@ -459,8 +472,7 @@ func main() {
 		for {
 			for id := curBeginId; id < curBeginId+onlineNum; id++ {
 				if isClose {
-					log.Println("检测到提前停止, 结束发送")
-					proxyDB.C.CTXCancel()
+					log.Println("send check was closed!...")
 					return
 				}
 				chId <- id //放入执行队列
@@ -476,14 +488,14 @@ func main() {
 			}
 			//是否全部执行完毕
 			if curStepCnt >= limitStepCnt {
-				log.Printf("全部执行完毕! curStepCnt[%d] >= limitStepCnt[%d]\n", curStepCnt, limitStepCnt)
+				log.Printf("all executed! curStepCnt[%d] >= limitStepCnt[%d]\n", curStepCnt, limitStepCnt)
 				proxyDB.C.CTXCancel()
 				return
 			}
 			curStepCnt++
 			curBeginId += stepId
 			beginTm = time.Now()
-			log.Printf("新一轮开始 curBeginId[%d] Step[%d/%d]\n", curBeginId, curStepCnt, limitStepCnt)
+			log.Printf("new turn curBeginId[%d] Step[%d/%d]\n", curBeginId, curStepCnt, limitStepCnt)
 		}
 	}
 	switch *op {
@@ -495,7 +507,6 @@ func main() {
 			curBeginId := *kCurBeginId
 			for i := 0; i < *kInsertNum; i++ {
 				if isClose {
-					proxyDB.C.CTXCancel()
 					return
 				}
 				chId <- curBeginId + i
