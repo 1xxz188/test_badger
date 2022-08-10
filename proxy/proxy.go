@@ -160,7 +160,7 @@ func (proxy *Proxy) SaveData() {
 				return true
 			})
 			//proxy.noSaveMap.Remove(key)
-			if !isRm {
+			if isRm {
 				isGet = true
 			}
 		})

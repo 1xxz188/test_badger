@@ -580,27 +580,4 @@ func main() {
 	fmt.Printf("RMButNotDelCnt: %d\n", proxyDB.GetRMButNotDelCnt())
 	fmt.Printf("timerSaveCnt: %d\n", proxyDB.GetTimerSaveCnt())
 	fmt.Printf("RmButNotFind: %d\n", atomic.LoadUint64(&proxyDB.RmButNotFind))
-
-	for i := 0; i < 5; i++ {
-		time.Sleep(time.Second * 2)
-		fmt.Printf(".....................................................\n")
-		proxyDB.SaveData()
-		now := time.Now()
-		fmt.Printf("DBCount: %d, cost: %s\n", badgerApi.GetDBCount(proxyDB.DB), time.Since(now).String())
-
-		now = time.Now()
-		fmt.Printf("[%d] Role_ cost: %s\n", badgerApi.GetPreDBCount(proxyDB.DB, "Role_"), time.Since(now).String())
-
-		now = time.Now()
-		fmt.Printf("[%d] Item_ cost: %s\n", badgerApi.GetPreDBCount(proxyDB.DB, "Item_"), time.Since(now).String())
-
-		now = time.Now()
-		fmt.Printf("[%d] Build_ cost: %s\n", badgerApi.GetPreDBCount(proxyDB.DB, "Build_"), time.Since(now).String())
-
-		now = time.Now()
-		fmt.Printf("[%d] Home_ cost: %s\n", badgerApi.GetPreDBCount(proxyDB.DB, "Home_"), time.Since(now).String())
-
-		now = time.Now()
-		fmt.Printf("[%d] Map_ cost: %s\n", badgerApi.GetPreDBCount(proxyDB.DB, "Map_"), time.Since(now).String())
-	}
 }
