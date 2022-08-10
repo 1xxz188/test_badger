@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	badger "github.com/dgraph-io/badger/v3"
-	cmap "github.com/orcaman/concurrent-map"
 	"github.com/shopspring/decimal"
 	"gopkg.in/alecthomas/kingpin.v2"
 	"log"
@@ -36,6 +35,8 @@ type Collect struct {
 	conflictsCount   int64 //版本冲突次数
 	maxRetryCount    int64
 }
+
+var revMsgCnt int64
 
 func fnBatchUpdate(db *badger.DB, info *Collect, id int, dataLen int) error {
 	wb := db.NewWriteBatch()
@@ -315,6 +316,7 @@ func work(proxyDB *proxy.Proxy, coroutines int, op string, chId chan int, dataLe
 
 			if op == "insert" || op == "set" {
 				for id := range chId {
+					atomic.AddInt64(&revMsgCnt, 1)
 					if err := fnBatchUpdate2(proxyDB, &updateInfo, id, dataLen, 0, false); err != nil {
 						panic(err)
 					}
@@ -373,7 +375,7 @@ func work(proxyDB *proxy.Proxy, coroutines int, op string, chId chan int, dataLe
 }
 
 func main() {
-	cmap.SHARD_COUNT = 1024
+	//cmap.SHARD_COUNT = 1024
 	op := kingpin.Flag("op", "[insert] [get] [set] [get-set]").Default("get-set").String()
 	lsmMaxValue := kingpin.Flag("lsmMaxValue", "with value threshold for lsm").Default("65").Int64() //大于指针大小即可
 	coroutines := kingpin.Flag("coroutines", "logic coroutines for client").Short('c').Default("4").Int()
@@ -573,4 +575,10 @@ func main() {
 	fmt.Printf("[%d] Map_ cost: %s\n", badgerApi.GetPreDBCount(proxyDB.DB, "Map_"), time.Since(now).String())
 
 	fmt.Printf("GetCachePenetrateCnt: %d\n", proxyDB.GetCachePenetrateCnt())
+	fmt.Printf("revMsgCnt: %d\n", atomic.LoadInt64(&revMsgCnt))
+	fmt.Printf("noSaveMapFlagCnt: %d\n", proxyDB.GetNoSaveMapFlagCnt())
+	fmt.Printf("RMButNotDelCnt: %d\n", proxyDB.GetRMButNotDelCnt())
+	fmt.Printf("timerSaveCnt: %d\n", proxyDB.GetTimerSaveCnt())
+	fmt.Printf("RmButNotFind: %d\n", atomic.LoadUint64(&proxyDB.RmButNotFind))
+
 }

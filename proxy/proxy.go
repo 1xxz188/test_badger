@@ -36,6 +36,11 @@ type Proxy struct {
 	_                 [56]byte                    //cpu cache
 	cacheCnt          uint64                      //缓存命中次数
 	serializer        serialize.Serializer
+	_                 [56]byte //cpu
+	rmButNotDelCnt    uint64   //淘汰内存次数(非正常过期)
+	timerSaveCnt      uint64   //定期执行写入key数
+	noSaveMapFlagCnt  uint64   //设置次数
+	RmButNotFind      uint64
 }
 
 func CreateDBProxy(opt Opts) (*Proxy, error) {
@@ -59,15 +64,18 @@ func CreateDBProxy(opt Opts) (*Proxy, error) {
 	}
 
 	*opt.fnRemoveButNotDel = func(key string, entry []byte) {
-		//如果未保存则保存
+		//这里尽量不阻塞! 会影响前台分片的读写锁时间
+		//proxy.waitToRemoveMap.Set(key, nil)
 		_, ok := proxy.noSaveMap.Get(key)
 		if !ok {
+			atomic.AddUint64(&proxy.RmButNotFind, 1)
 			return
 		}
 		proxy.noSaveMap.Remove(key)
 
 		//TODO 添加记录日志。程序能进入到这里，说明定时保存的速度已不够(生产速度大于消费速度)。需要添加内存上限，或者优化程序，提高解码效率
-		fmt.Printf("warning save by remove key[%s]\n", key)
+		//fmt.Printf("warning save by remove key[%s]\n", key)
+		atomic.AddUint64(&proxy.rmButNotDelCnt, 1)
 
 		_ = proxy.DB.Update(func(txn *badger.Txn) error {
 			//TODO 优化不用解析直接判断是否过期
@@ -138,6 +146,7 @@ func CreateDBProxy(opt Opts) (*Proxy, error) {
 					}
 					e.WithTTL(time.Duration(diffSec) * time.Second)
 				}
+				atomic.AddUint64(&proxy.timerSaveCnt, 1)
 				err = wb.SetEntry(e)
 				if err != nil { //批量写入事务 内部已经处理了ErrTxnTooBig
 					panic(err)
@@ -157,6 +166,7 @@ func CreateDBProxy(opt Opts) (*Proxy, error) {
 			case <-proxy.C.CTXDone():
 				//wait all data save
 				proxy.C.ProducerWait() //wait all send data coroutine exit
+				//time.Sleep(time.Second * 10)
 				fmt.Println("wait all data save")
 				saveData()
 				fmt.Println("all data save ok")
@@ -315,6 +325,17 @@ func (proxy *Proxy) GetCacheCnt() uint64 {
 	return atomic.LoadUint64(&proxy.cacheCnt)
 }
 
+func (proxy *Proxy) GetRMButNotDelCnt() uint64 {
+	return atomic.LoadUint64(&proxy.rmButNotDelCnt)
+}
+
+func (proxy *Proxy) GetTimerSaveCnt() uint64 {
+	return atomic.LoadUint64(&proxy.timerSaveCnt)
+}
+func (proxy *Proxy) GetNoSaveMapFlagCnt() uint64 {
+	return atomic.LoadUint64(&proxy.noSaveMapFlagCnt)
+}
+
 func (proxy *Proxy) GetCachePenetrateRate() float64 {
 	f := float64(proxy.GetCacheCnt())
 	if f == 0 {
@@ -403,6 +424,7 @@ func (proxy *Proxy) set(kv *badgerApi.KV) error {
 		return err
 	}
 	proxy.noSaveMap.Set(kv.K, nil)
+	atomic.AddUint64(&proxy.noSaveMapFlagCnt, 1)
 	return nil
 }
 

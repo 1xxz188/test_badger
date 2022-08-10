@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"fmt"
 	"github.com/allegro/bigcache/v3"
 	"github.com/dgraph-io/badger/v3"
 	"test_badger/badgerApi"
@@ -24,7 +25,8 @@ func DefaultBigCacheOptions(optBadger badger.Options, bigCacheConf bigcache.Conf
 	bigCache, err := cachedb.NewBigCache(bigCacheConf, func(key string, entry []byte, reason cachedb.RemoveReason) {
 		//进入缓存淘汰，不存在移除的时候同时插入(底层有分片锁)
 		if reason == cachedb.Deleted {
-			return //定期保存的时候自然会过滤掉已删除的key
+			panic(fmt.Sprintf("key[%s] remove by cachedb.Deleted", key)) //TODO 删除
+			return                                                       //定期保存的时候自然会过滤掉已删除的key
 		}
 		//Call
 		if (*fnRemoveButNotDel) == nil {
