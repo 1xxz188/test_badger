@@ -63,15 +63,22 @@ func CreateDBProxy(opt Opts) (*Proxy, error) {
 		serializer:  json.NewSerializer(),
 	}
 
+	//移除缓存回调
 	*opt.fnRemoveButNotDel = func(key string, entry []byte) {
 		//这里尽量不阻塞! 会影响前台分片的读写锁时间
 		//proxy.waitToRemoveMap.Set(key, nil)
-		_, ok := proxy.noSaveMap.Get(key)
-		if !ok {
-			atomic.AddUint64(&proxy.RmButNotFind, 1)
+		isRm := proxy.noSaveMap.RemoveCb(key, func(key string, _ interface{}, exists bool) bool {
+			if !exists {
+				return false
+			}
+			atomic.AddUint64(&proxy.RmButNotFind, 1) //TODO 删除
+			return true
+		})
+		//proxy.noSaveMap.Remove(key)
+		if !isRm {
+			//atomic.AddUint64(&proxy.RmButNotFind, 1) //TODO 打开
 			return
 		}
-		proxy.noSaveMap.Remove(key)
 
 		//TODO 添加记录日志。程序能进入到这里，说明定时保存的速度已不够(生产速度大于消费速度)。需要添加内存上限，或者优化程序，提高解码效率
 		//fmt.Printf("warning save by remove key[%s]\n", key)
@@ -98,6 +105,7 @@ func CreateDBProxy(opt Opts) (*Proxy, error) {
 		})
 	}
 
+	//开启定时保存协程
 	proxy.C.ConsumerAdd(1)
 	go func() {
 		defer proxy.C.ConsumerDone()
@@ -105,70 +113,16 @@ func CreateDBProxy(opt Opts) (*Proxy, error) {
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
 
-		var v []byte
-		var err error
-
-		//定时保存函数
-		saveData := func() {
-			if proxy.noSaveMap.Count() <= 0 {
-				return
-			}
-
-			wb := proxy.DB.NewWriteBatch()
-			defer wb.Cancel()
-			now := time.Now()
-			startTm := now
-			toSave := proxy.noSaveMap.Items()
-			snapshotMs := time.Since(now).Milliseconds()
-			now = time.Now()
-			var kv badgerApi.KV
-			for key := range toSave {
-				proxy.noSaveMap.Remove(key)
-				v, err = proxy.cache.Get(key)
-				if err != nil {
-					continue
-				}
-				// maxBatchCount int64 // max entries in batch    ---> 10w  MaxBatchSize()
-				// maxBatchSize  int64 // max batch size in bytes ---> 9.5MB MaxBatchSize()
-				//err = wb.Set([]byte(key), v)
-				//TODO 优化不用解析直接判断是否过期
-				e := badger.NewEntry([]byte(key), v)
-				err = proxy.serializer.Unmarshal(v, &kv)
-				if err != nil {
-					panic(err)
-				}
-
-				if kv.ExpiresAt > 0 {
-					t := time.Unix(int64(kv.ExpiresAt), 0)
-					diffSec := now.Sub(t).Seconds()
-					if diffSec < 1 {
-						continue
-					}
-					e.WithTTL(time.Duration(diffSec) * time.Second)
-				}
-				atomic.AddUint64(&proxy.timerSaveCnt, 1)
-				err = wb.SetEntry(e)
-				if err != nil { //批量写入事务 内部已经处理了ErrTxnTooBig
-					panic(err)
-				}
-			}
-			rangeMs := time.Since(now).Milliseconds()
-			now = time.Now()
-			if err = wb.Flush(); err != nil {
-				panic(err)
-			}
-			fmt.Printf(">save key size[%d] snapshot[%d ms] range[%d ms] Flush[%d ms] total[%d ms]\n", len(toSave), snapshotMs, rangeMs, time.Since(now).Milliseconds(), time.Since(startTm).Milliseconds())
-		}
 		for {
 			select {
 			case _ = <-ticker.C:
-				saveData()
+				proxy.SaveData()
 			case <-proxy.C.CTXDone():
 				//wait all data save
 				proxy.C.ProducerWait() //wait all send data coroutine exit
 				//time.Sleep(time.Second * 10)
 				fmt.Println("wait all data save")
-				saveData()
+				proxy.SaveData()
 				fmt.Println("all data save ok")
 				return
 			}
@@ -177,6 +131,76 @@ func CreateDBProxy(opt Opts) (*Proxy, error) {
 
 	return proxy, nil
 }
+
+func (proxy *Proxy) SaveData() {
+	if proxy.noSaveMap.Count() <= 0 {
+		return
+	}
+
+	wb := proxy.DB.NewWriteBatch()
+	defer wb.Cancel()
+	now := time.Now()
+	startTm := now
+	toSave := proxy.noSaveMap.Items()
+	snapshotMs := time.Since(now).Milliseconds()
+	now = time.Now()
+
+	var err error
+	var kv badgerApi.KV
+	var v []byte
+	isGet := false
+	for key := range toSave {
+		isGet = false
+		v, err = proxy.cache.GetCb(key, func() {
+			isRm := proxy.noSaveMap.RemoveCb(key, func(key string, _ interface{}, exists bool) bool {
+				if !exists {
+					return false
+				}
+				atomic.AddUint64(&proxy.RmButNotFind, 1) //TODO 删除
+				return true
+			})
+			//proxy.noSaveMap.Remove(key)
+			if !isRm {
+				isGet = true
+			}
+		})
+
+		if err != nil || !isGet {
+			continue
+		}
+
+		// maxBatchCount int64 // max entries in batch    ---> 10w  MaxBatchSize()
+		// maxBatchSize  int64 // max batch size in bytes ---> 9.5MB MaxBatchSize()
+		//err = wb.Set([]byte(key), v)
+		//TODO 优化不用解析直接判断是否过期
+		e := badger.NewEntry([]byte(key), v)
+		err = proxy.serializer.Unmarshal(v, &kv)
+		if err != nil {
+			panic(err)
+		}
+
+		if kv.ExpiresAt > 0 {
+			t := time.Unix(int64(kv.ExpiresAt), 0)
+			diffSec := now.Sub(t).Seconds()
+			if diffSec < 1 {
+				continue
+			}
+			e.WithTTL(time.Duration(diffSec) * time.Second)
+		}
+		atomic.AddUint64(&proxy.timerSaveCnt, 1)
+		err = wb.SetEntry(e)
+		if err != nil { //批量写入事务 内部已经处理了ErrTxnTooBig
+			panic(err)
+		}
+	}
+	rangeMs := time.Since(now).Milliseconds()
+	now = time.Now()
+	if err = wb.Flush(); err != nil {
+		panic(err)
+	}
+	fmt.Printf(">save key size[%d] snapshot[%d ms] range[%d ms] Flush[%d ms] total[%d ms]\n", len(toSave), snapshotMs, rangeMs, time.Since(now).Milliseconds(), time.Since(startTm).Milliseconds())
+}
+
 func (proxy *Proxy) Close() error {
 	proxy.C.ProducerWait() //等待生产消息退出
 	proxy.C.ConsumerWait() //等待数据落地
@@ -420,10 +444,11 @@ func (proxy *Proxy) set(kv *badgerApi.KV) error {
 	if err != nil {
 		return err
 	}
-	if err := proxy.cache.Set(kv.K, v); err != nil {
+	if err := proxy.cache.SetCb(kv.K, v, func() {
+		proxy.noSaveMap.Set(kv.K, nil)
+	}); err != nil {
 		return err
 	}
-	proxy.noSaveMap.Set(kv.K, nil)
 	atomic.AddUint64(&proxy.noSaveMapFlagCnt, 1)
 	return nil
 }

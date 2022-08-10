@@ -71,6 +71,24 @@ func (db *BigCacheAPI) Get(key string) ([]byte, error) {
 	return data, err
 }
 
+func (db *BigCacheAPI) GetCb(key string, cb GetCb) ([]byte, error) {
+	if db == nil {
+		return nil, errors.New("db == nil")
+	}
+	if db.cache == nil {
+		return nil, errors.New("db.cache == nil")
+	}
+	data, err := db.cache.GetCb(key, func() {
+		if cb != nil {
+			cb()
+		}
+	})
+	if err == bigcache.ErrEntryNotFound {
+		return nil, ErrEntryNotFound
+	}
+	return data, err
+}
+
 func (db *BigCacheAPI) Set(key string, entry []byte) error {
 	if db == nil {
 		return errors.New("db == nil")
@@ -79,6 +97,21 @@ func (db *BigCacheAPI) Set(key string, entry []byte) error {
 		return errors.New("db.cache == nil")
 	}
 	return db.cache.Set(key, entry)
+}
+
+func (db *BigCacheAPI) SetCb(key string, entry []byte, cb SetCb) error {
+	if db == nil {
+		return errors.New("db == nil")
+	}
+	if db.cache == nil {
+		return errors.New("db.cache == nil")
+	}
+
+	return db.cache.SetCb(key, entry, func() {
+		if cb != nil {
+			cb()
+		}
+	})
 }
 
 func (db *BigCacheAPI) GetCache() (*bigcache.BigCache, error) {

@@ -71,7 +71,6 @@ require (
 	github.com/valyala/fasthttp v1.31.0 // indirect
 	github.com/valyala/tcplisten v1.0.0 // indirect
 	github.com/xiang90/probing v0.0.0-20190116061207-43a291ad63a2 // indirect
-	github.com/yireyun/go-queue v0.0.0-20220725040158-a4dd64810e1e // indirect
 	go.etcd.io/bbolt v1.3.3 // indirect
 	go.etcd.io/etcd v0.0.0-20210226220824-aa7126864d82 // indirect
 	go.opencensus.io v0.22.5 // indirect

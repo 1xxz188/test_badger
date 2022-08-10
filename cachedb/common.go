@@ -22,9 +22,14 @@ const (
 	UnknownReason = RemoveReason(4)
 )
 
+type SetCb func()
+type GetCb func()
+
 type Cache interface {
 	Get(key string) ([]byte, error)
+	GetCb(key string, cb GetCb) ([]byte, error)
 	Set(key string, entry []byte) error
+	SetCb(key string, entry []byte, cb SetCb) error
 	Delete(key string) error
 	Len() int
 	Close() error
