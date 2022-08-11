@@ -30,7 +30,7 @@ func TestReadDB(t *testing.T) {
 
 		watchKey := "watchKey1"
 		keys := []string{"key1"}
-		kvList, version := proxy.Gets(watchKey, keys)
+		kvList, version := proxy.GetsByWatch(watchKey, keys)
 		require.Equal(t, 1, len(kvList))
 		require.Equal(t, uint32(1), version)
 		for _, kv := range kvList {
@@ -42,10 +42,10 @@ func TestReadDB(t *testing.T) {
 			K: keys[0],
 			V: []byte("v1"),
 		})
-		err = proxy.SetsByVersion(watchKey, version, kvs)
+		err = proxy.SetsByWatch(watchKey, version, kvs)
 		require.NoError(t, err)
 
-		kvList, version = proxy.Gets(watchKey, keys)
+		kvList, version = proxy.GetsByWatch(watchKey, keys)
 		require.Equal(t, 1, len(kvList))
 		require.Equal(t, uint32(2), version)
 		for _, kv := range kvList {
@@ -53,7 +53,7 @@ func TestReadDB(t *testing.T) {
 		}
 
 		kvs[0].V = []byte("v2")
-		err = proxy.SetsByVersion(watchKey, version, kvs)
+		err = proxy.SetsByWatch(watchKey, version, kvs)
 		require.NoError(t, err)
 
 		proxy.C.CTXCancel() //触发退出信号
@@ -77,7 +77,7 @@ func TestReadDB(t *testing.T) {
 
 		watchKey := "watchKey1"
 		keys := []string{"key1"}
-		kvList, version := proxy.Gets(watchKey, keys)
+		kvList, version := proxy.GetsByWatch(watchKey, keys)
 		require.Equal(t, 1, len(kvList))
 		require.Equal(t, uint32(1), version)
 		for _, kv := range kvList {
@@ -125,7 +125,7 @@ func TestSave(t *testing.T) {
 	var keyList []string
 	keyList = append(keyList, "key_1")
 	watchKey := "watchKey_1"
-	items, _ := proxy.Gets(watchKey, keyList)
+	items, _ := proxy.GetsByWatch(watchKey, keyList)
 	if len(items) != len(keyList) {
 		panic("len(items) != len(keyList)")
 	}

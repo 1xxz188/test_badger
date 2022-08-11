@@ -194,12 +194,12 @@ func fnBatchUpdate2(db *proxy.Proxy, info *Collect, id int, dataLen int, version
 
 	if isCheckVersion {
 		watchKey := "Watch_" + strconv.Itoa(10000000+id)
-		err := db.SetsByVersion(watchKey, version, kvs)
+		err := db.SetsByWatch(watchKey, version, kvs)
 		if err != nil {
 			return err
 		}
 	} else {
-		err := db.Sets("", kvs)
+		err := db.Sets(kvs)
 		if err != nil {
 			return err
 		}
@@ -241,7 +241,7 @@ func fnBatchRead2(db *proxy.Proxy, info *Collect, id int) (uint32, error) { //re
 	watchKey := "Watch_" + strconv.Itoa(10000000+id)
 	beginTm := time.Now()
 
-	items, version := db.Gets(watchKey, keyList)
+	items, version := db.GetsByWatch(watchKey, keyList)
 	if len(items) != len(keyList) {
 		panic("len(items) != len(keyList)")
 	}
@@ -351,7 +351,6 @@ func work(proxyDB *proxy.Proxy, coroutines int, op string, chId chan int, dataLe
 						}
 						break
 					}
-
 				}
 			}
 
@@ -392,6 +391,7 @@ func main() {
 	kLimitStepCnt := kingpin.Flag("limitStepCnt", "[get-set] total limit step cnt").Default("5").Int()
 	kCurBeginId := kingpin.Flag("beginId", "[get-set] begin id").Default("10000").Int()
 	kSendLimit := kingpin.Flag("sendLimit", "[get-set] send count for per ms").Default("1").Int()
+	kNoUseCache := kingpin.Flag("noUseCache", "not use cache").Bool()
 
 	kPprof := kingpin.Flag("pprof", "ip:port of pprof listen addr").Default("0.0.0.0:11000").String()
 	kWebAddr := kingpin.Flag("web", "ip:port of web listen addr").Default("0.0.0.0:11002").String()
@@ -410,12 +410,22 @@ func main() {
 	}()
 
 	openTm := time.Now()
-	log.Printf("openTm[%d ms] dataLen[%d], lsmMaxValue[%d]\n", time.Since(openTm).Milliseconds(), dataLen, *lsmMaxValue)
+	log.Printf("openTm[%d ms] dataLen[%d], lsmMaxValue[%d] noUseCache[%t]\n", time.Since(openTm).Milliseconds(), dataLen, *lsmMaxValue, *kNoUseCache)
 
-	proxyDB, err := proxy.CreateDBProxy(proxy.DefaultOptions("./data"))
-	if err != nil {
-		panic(err)
+	var proxyDB *proxy.Proxy
+	var err error
+	if *kNoUseCache {
+		proxyDB, err = proxy.CreateDBProxy(proxy.DefaultNoCache("./data"))
+		if err != nil {
+			panic(err)
+		}
+	} else {
+		proxyDB, err = proxy.CreateDBProxy(proxy.DefaultOptions("./data"))
+		if err != nil {
+			panic(err)
+		}
 	}
+
 	defer func() {
 		err := proxyDB.Close()
 		if err != nil {

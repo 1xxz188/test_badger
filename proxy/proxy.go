@@ -28,6 +28,7 @@ type Proxy struct {
 	C                 *controlEXE.ControlEXE //协程生命周期控制器(生产消息协程,消费协程,GC协程)
 	DB                *badger.DB             //底层数据
 	GCInfo            GcInfo
+	IsUseCache        bool
 	dbDir             string
 	cache             cachedb.Cache               //缓存层
 	watchKeyMgr       *customWatchKey.WatchKeyMgr //用于缓存层数据一致性控制
@@ -56,6 +57,7 @@ func CreateDBProxy(opt Opts) (*Proxy, error) {
 	proxy := &Proxy{
 		DB:          db,
 		C:           opt.c,
+		IsUseCache:  opt.IsUseCache,
 		cache:       opt.cache,
 		dbDir:       opt.optBadger.Dir,
 		watchKeyMgr: watchKeyMgr,
@@ -64,75 +66,77 @@ func CreateDBProxy(opt Opts) (*Proxy, error) {
 	}
 
 	//移除缓存回调
-	*opt.fnRemoveButNotDel = func(key string, entry []byte) {
-		//这里尽量不阻塞! 会影响前台分片的读写锁时间
-		//proxy.waitToRemoveMap.Set(key, nil)
-		isRm := proxy.noSaveMap.RemoveCb(key, func(key string, _ interface{}, exists bool) bool {
-			if !exists {
-				return false
-			}
-			atomic.AddUint64(&proxy.RmButNotFind, 1) //TODO 删除
-			return true
-		})
-		//proxy.noSaveMap.Remove(key)
-		if !isRm {
-			//atomic.AddUint64(&proxy.RmButNotFind, 1) //TODO 打开
-			return
-		}
-
-		//TODO 添加记录日志。程序能进入到这里，说明定时保存的速度已不够(生产速度大于消费速度)。需要添加内存上限，或者优化程序，提高解码效率
-		//fmt.Printf("warning save by remove key[%s]\n", key)
-		atomic.AddUint64(&proxy.rmButNotDelCnt, 1)
-
-		_ = proxy.DB.Update(func(txn *badger.Txn) error {
-			//TODO 优化不用解析直接判断是否过期
-			var kv badgerApi.KV
-			e := badger.NewEntry([]byte(key), entry)
-			err = proxy.serializer.Unmarshal(entry, &kv)
-			if err != nil {
-				panic(err)
-			}
-
-			if kv.ExpiresAt > 0 {
-				t := time.Unix(int64(kv.ExpiresAt), 0)
-				diffSec := time.Now().Sub(t).Seconds()
-				if diffSec < 1 {
-					return nil
+	if proxy.IsUseCache {
+		*opt.fnRemoveButNotDel = func(key string, entry []byte) {
+			//这里尽量不阻塞! 会影响前台分片的读写锁时间
+			//proxy.waitToRemoveMap.Set(key, nil)
+			isRm := proxy.noSaveMap.RemoveCb(key, func(key string, _ interface{}, exists bool) bool {
+				if !exists {
+					return false
 				}
-				e.WithTTL(time.Duration(diffSec) * time.Second)
-			}
-			return txn.SetEntry(e)
-		})
-	}
-
-	//开启定时保存协程
-	proxy.C.ConsumerAdd(1)
-	go func() {
-		defer proxy.C.ConsumerDone()
-		//interval save
-		ticker := time.NewTicker(time.Second)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case _ = <-ticker.C:
-				proxy.SaveData()
-			case <-proxy.C.CTXDone():
-				//wait all data save
-				proxy.C.ProducerWait() //wait all send data coroutine exit
-				//time.Sleep(time.Second * 10)
-				fmt.Println("wait all data save")
-				proxy.SaveData()
-				fmt.Println("all data save ok")
+				atomic.AddUint64(&proxy.RmButNotFind, 1) //TODO 删除
+				return true
+			})
+			//proxy.noSaveMap.Remove(key)
+			if !isRm {
+				//atomic.AddUint64(&proxy.RmButNotFind, 1) //TODO 打开
 				return
 			}
+
+			//TODO 添加记录日志。程序能进入到这里，说明定时保存的速度已不够(生产速度大于消费速度)。需要添加内存上限，或者优化程序，提高解码效率
+			//fmt.Printf("warning save by remove key[%s]\n", key)
+			atomic.AddUint64(&proxy.rmButNotDelCnt, 1)
+
+			_ = proxy.DB.Update(func(txn *badger.Txn) error {
+				//TODO 优化不用解析直接判断是否过期
+				var kv badgerApi.KV
+				err = proxy.serializer.Unmarshal(entry, &kv)
+				if err != nil {
+					panic(err)
+				}
+
+				e := badger.NewEntry([]byte(key), kv.V)
+				if kv.ExpiresAt > 0 {
+					t := time.Unix(int64(kv.ExpiresAt), 0)
+					diffSec := time.Now().Sub(t).Seconds()
+					if diffSec < 1 {
+						return nil
+					}
+					e.WithTTL(time.Duration(diffSec) * time.Second)
+				}
+				return txn.SetEntry(e)
+			})
 		}
-	}()
+
+		//开启定时保存协程
+		proxy.C.ConsumerAdd(1)
+		go func() {
+			defer proxy.C.ConsumerDone()
+			//interval save
+			ticker := time.NewTicker(time.Second)
+			defer ticker.Stop()
+
+			for {
+				select {
+				case _ = <-ticker.C:
+					proxy.saveData()
+				case <-proxy.C.CTXDone():
+					//wait all data save
+					proxy.C.ProducerWait() //wait all send data coroutine exit
+					//time.Sleep(time.Second * 10)
+					fmt.Println("wait all data save")
+					proxy.saveData()
+					fmt.Println("all data save ok")
+					return
+				}
+			}
+		}()
+	}
 
 	return proxy, nil
 }
 
-func (proxy *Proxy) SaveData() {
+func (proxy *Proxy) saveData() {
 	if proxy.noSaveMap.Count() <= 0 {
 		return
 	}
@@ -171,14 +175,13 @@ func (proxy *Proxy) SaveData() {
 
 		// maxBatchCount int64 // max entries in batch    ---> 10w  MaxBatchSize()
 		// maxBatchSize  int64 // max batch size in bytes ---> 9.5MB MaxBatchSize()
-		//err = wb.Set([]byte(key), v)
-		//TODO 优化不用解析直接判断是否过期
-		e := badger.NewEntry([]byte(key), v)
+
 		err = proxy.serializer.Unmarshal(v, &kv)
 		if err != nil {
 			panic(err)
 		}
-
+		//TODO 优化不用解析直接判断是否过期
+		e := badger.NewEntry([]byte(key), kv.V)
 		if kv.ExpiresAt > 0 {
 			t := time.Unix(int64(kv.ExpiresAt), 0)
 			diffSec := now.Sub(t).Seconds()
@@ -402,6 +405,13 @@ func (proxy *Proxy) get(txn *badger.Txn, key string) *badgerApi.KV {
 		kv.Err = err.Error()
 		return &kv
 	}
+	kv.V = v
+	kv.ExpiresAt = item.ExpiresAt()
+
+	v, err = proxy.serializer.Marshal(kv)
+	if err != nil {
+		kv.Err = err.Error()
+	}
 
 	//更新到缓存中
 	err = proxy.cache.Set(key, v)
@@ -409,36 +419,65 @@ func (proxy *Proxy) get(txn *badger.Txn, key string) *badgerApi.KV {
 		kv.Err = err.Error()
 		return &kv
 	}
-	err = proxy.serializer.Unmarshal(v, &kv)
-	if err != nil {
-		kv.Err = err.Error()
-	}
+
 	return &kv
 }
 
-func (proxy *Proxy) Gets(watchKey string, keys []string) (result []*badgerApi.KV, version uint32) {
-	if len(watchKey) != 0 {
-		_ = proxy.watchKeyMgr.Read(watchKey, func(keyVersion uint32) error {
-			version = keyVersion
-			txn := proxy.DB.NewTransaction(false)
-			defer txn.Discard()
+func (proxy *Proxy) Gets(keys []string) (result []*badgerApi.KV, version uint32) {
+	txn := proxy.DB.NewTransaction(false)
+	defer txn.Discard()
 
-			for _, key := range keys {
-				result = append(result, proxy.get(txn, key))
-			}
-			return nil
-		})
-		return result, version
-	} else {
-		txn := proxy.DB.NewTransaction(false)
-		defer txn.Discard()
-
+	if proxy.IsUseCache {
 		for _, key := range keys {
 			result = append(result, proxy.get(txn, key))
 		}
 		return result, 0
 	}
+
+	return proxy.getDb(keys, txn, result), 0
 }
+
+func (proxy *Proxy) getDb(keys []string, txn *badger.Txn, result []*badgerApi.KV) []*badgerApi.KV {
+	for _, key := range keys {
+		var kv badgerApi.KV //TODO 考虑池化kv对象
+		kv.K = key
+		item, err := txn.Get([]byte(key))
+		if err != nil {
+			kv.Err = err.Error()
+			if err == badger.ErrKeyNotFound { //转换错误
+				kv.Err = cachedb.ErrEntryNotFound.Error()
+			}
+		} else {
+			v, err := item.ValueCopy(nil)
+			if err != nil {
+				kv.Err = err.Error()
+			}
+			kv.V = v
+			kv.ExpiresAt = item.ExpiresAt()
+		}
+		result = append(result, &kv)
+	}
+	return result
+}
+
+func (proxy *Proxy) GetsByWatch(watchKey string, keys []string) (result []*badgerApi.KV, version uint32) {
+	_ = proxy.watchKeyMgr.Read(watchKey, func(keyVersion uint32) error {
+		version = keyVersion
+		txn := proxy.DB.NewTransaction(false)
+		defer txn.Discard()
+
+		if proxy.IsUseCache {
+			for _, key := range keys {
+				result = append(result, proxy.get(txn, key))
+			}
+			return nil
+		}
+		result = proxy.getDb(keys, txn, result)
+		return nil
+	})
+	return result, version
+}
+
 func (proxy *Proxy) set(kv *badgerApi.KV) error {
 	v, err := proxy.serializer.Marshal(kv)
 	if err != nil {
@@ -454,18 +493,8 @@ func (proxy *Proxy) set(kv *badgerApi.KV) error {
 }
 
 // Sets TODO 改protobuf结构参数
-func (proxy *Proxy) Sets(watchKey string, kvs []badgerApi.KV) error {
-	if len(watchKey) != 0 {
-		return proxy.watchKeyMgr.Write(watchKey, 0, false, func(keyVersion uint32) error {
-			for i := 0; i < len(kvs); i++ {
-				err := proxy.set(&kvs[i])
-				if err != nil {
-					return err
-				}
-			}
-			return nil
-		})
-	} else {
+func (proxy *Proxy) Sets(kvs []badgerApi.KV) error {
+	if proxy.IsUseCache {
 		for i := 0; i < len(kvs); i++ {
 			err := proxy.set(&kvs[i])
 			if err != nil {
@@ -474,17 +503,33 @@ func (proxy *Proxy) Sets(watchKey string, kvs []badgerApi.KV) error {
 		}
 		return nil
 	}
+
+	var err error
+	wb := proxy.DB.NewWriteBatch()
+	defer wb.Cancel()
+	for i := 0; i < len(kvs); i++ {
+		e := badger.NewEntry([]byte(kvs[i].K), kvs[i].V)
+		if kvs[i].ExpiresAt > 0 {
+			t := time.Unix(int64(kvs[i].ExpiresAt), 0)
+			diffSec := time.Now().Sub(t).Seconds()
+			if diffSec < 1 {
+				continue
+			}
+			e.WithTTL(time.Duration(diffSec) * time.Second)
+		}
+
+		err = wb.SetEntry(e)
+		if err != nil { //批量写入事务 内部已经处理了ErrTxnTooBig
+			return err
+		}
+	}
+
+	return wb.Flush()
 }
 
-// SetsByVersion 注意: keyVersion为0也是有效版本,因为允许翻转
-func (proxy *Proxy) SetsByVersion(watchKey string, keyVersion uint32, kvs []badgerApi.KV) error {
+// SetsByWatch 注意: keyVersion为0也是有效版本,因为允许翻转
+func (proxy *Proxy) SetsByWatch(watchKey string, keyVersion uint32, kvs []badgerApi.KV) error {
 	return proxy.watchKeyMgr.Write(watchKey, keyVersion, true, func(keyVersion uint32) error {
-		for i := 0; i < len(kvs); i++ {
-			err := proxy.set(&kvs[i])
-			if err != nil {
-				return err
-			}
-		}
-		return nil
+		return proxy.Sets(kvs)
 	})
 }

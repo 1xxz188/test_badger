@@ -14,10 +14,19 @@ type Opts struct {
 	cache             cachedb.Cache                   //缓存层 (默认bigCache) 可替换
 	fnRemoveButNotDel *func(key string, entry []byte) //缓存层移除时，需要回调做数据落库
 	c                 *controlEXE.ControlEXE          //协程生命周期控制器(生产消息协程,消费协程,GC协程)
+	IsUseCache        bool
 }
 
 func DefaultOptions(dbDir string) Opts {
 	return DefaultBigCacheOptions(badgerApi.DefaultOptions(dbDir), cachedb.DefaultBigCacheOptions())
+}
+
+func DefaultNoCache(dbDir string) Opts {
+	return Opts{
+		optBadger:  badgerApi.DefaultOptions(dbDir),
+		c:          controlEXE.CreateControlEXE(),
+		IsUseCache: false,
+	}
 }
 
 func DefaultBigCacheOptions(optBadger badger.Options, bigCacheConf bigcache.Config) Opts { //badgerApi.DefaultOptions(dbDir), cachedb.DefaultBigCacheOptions()
@@ -42,5 +51,6 @@ func DefaultBigCacheOptions(optBadger badger.Options, bigCacheConf bigcache.Conf
 		cache:             bigCache,
 		fnRemoveButNotDel: fnRemoveButNotDel,
 		c:                 controlEXE.CreateControlEXE(),
+		IsUseCache:        true,
 	}
 }

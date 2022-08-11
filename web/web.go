@@ -97,7 +97,7 @@ func getKey() func(c *fiber.Ctx) error {
 			return c.Send(fnResp("db not init"))
 		}
 
-		kv, _ := thisProxy.Gets("", []string{key})
+		kv, _ := thisProxy.Gets([]string{key})
 		if len(kv) != 1 {
 			return c.Send(fnResp("server internal logic error"))
 		}
