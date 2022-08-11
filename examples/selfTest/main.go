@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	badger "github.com/dgraph-io/badger/v3"
+	"github.com/dgraph-io/badger/v3"
 	"github.com/shopspring/decimal"
 	"gopkg.in/alecthomas/kingpin.v2"
 	"log"
@@ -374,7 +374,6 @@ func work(proxyDB *proxy.Proxy, coroutines int, op string, chId chan int, dataLe
 }
 
 func main() {
-	//cmap.SHARD_COUNT = 1024
 	op := kingpin.Flag("op", "[insert] [get] [set] [get-set]").Default("get-set").String()
 	lsmMaxValue := kingpin.Flag("lsmMaxValue", "with value threshold for lsm").Default("65").Int64() //大于指针大小即可
 	coroutines := kingpin.Flag("coroutines", "logic coroutines for client").Short('c').Default("4").Int()
