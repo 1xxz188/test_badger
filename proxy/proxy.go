@@ -424,7 +424,7 @@ func (proxy *Proxy) get(txn *badger.Txn, key string) *badgerApi.KV {
 	return kv
 }
 
-func (proxy *Proxy) Gets(keys []string) (result []*badgerApi.KV, version uint32) {
+func (proxy *Proxy) Gets(keys []string) (result []*badgerApi.KV) {
 	txn := proxy.DB.NewTransaction(false)
 	defer txn.Discard()
 
@@ -432,10 +432,10 @@ func (proxy *Proxy) Gets(keys []string) (result []*badgerApi.KV, version uint32)
 		for _, key := range keys {
 			result = append(result, proxy.get(txn, key))
 		}
-		return result, 0
+		return result
 	}
 
-	return proxy.getDb(keys, txn, result), 0
+	return proxy.getDb(keys, txn, result)
 }
 
 func (proxy *Proxy) getDb(keys []string, txn *badger.Txn, result []*badgerApi.KV) []*badgerApi.KV {
@@ -463,16 +463,7 @@ func (proxy *Proxy) getDb(keys []string, txn *badger.Txn, result []*badgerApi.KV
 func (proxy *Proxy) GetsByWatch(watchKey string, keys []string) (result []*badgerApi.KV, version uint32) {
 	_ = proxy.watchKeyMgr.Read(watchKey, func(keyVersion uint32) error {
 		version = keyVersion
-		txn := proxy.DB.NewTransaction(false)
-		defer txn.Discard()
-
-		if proxy.isUseCache {
-			for _, key := range keys {
-				result = append(result, proxy.get(txn, key))
-			}
-			return nil
-		}
-		result = proxy.getDb(keys, txn, result)
+		result = proxy.Gets(keys)
 		return nil
 	})
 	return result, version

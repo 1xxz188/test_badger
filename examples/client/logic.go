@@ -3,10 +3,10 @@ package main
 import (
 	"errors"
 	"fmt"
+	json "github.com/json-iterator/go"
 	"io/ioutil"
 	"net/http"
 )
-import json "github.com/json-iterator/go"
 
 type KV struct {
 	K         string `json:"key"`
