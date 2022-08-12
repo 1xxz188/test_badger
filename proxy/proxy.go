@@ -25,23 +25,26 @@ type GcInfo struct {
 }
 
 type Proxy struct {
-	C                 *controlEXE.ControlEXE //协程生命周期控制器(生产消息协程,消费协程,GC协程)
-	DB                *badger.DB             //底层数据
-	GCInfo            GcInfo
-	IsUseCache        bool
-	dbDir             string
-	cache             cachedb.Cache               //缓存层
-	watchKeyMgr       *customWatchKey.WatchKeyMgr //用于缓存层数据一致性控制
-	noSaveMap         cmap.ConcurrentMap          //待保存列表
-	cachePenetrateCnt uint64                      //缓存穿透次数
-	_                 [56]byte                    //cpu cache
-	cacheCnt          uint64                      //缓存命中次数
-	serializer        serialize.Serializer
+	C           *controlEXE.ControlEXE //协程生命周期控制器(生产消息协程,消费协程,GC协程)
+	DB          *badger.DB             //底层数据
+	GCInfo      GcInfo
+	isUseCache  bool //是否使用缓存模式
+	dbDir       string
+	cache       cachedb.Cache               //缓存层
+	watchKeyMgr *customWatchKey.WatchKeyMgr //用于缓存层数据一致性控制
+	noSaveMap   cmap.ConcurrentMap          //待保存列表
+	getKVPool   sync.Pool                   //获取请求对象池
+	serializer  serialize.Serializer
+
+	cachePenetrateCnt uint64   //缓存穿透次数
 	_                 [56]byte //cpu
-	rmButNotDelCnt    uint64   //淘汰内存次数(非正常过期)
-	timerSaveCnt      uint64   //定期执行写入key数
-	noSaveMapFlagCnt  uint64   //设置次数
-	RmButNotFind      uint64
+	cacheCnt          uint64   //缓存命中次数
+	_                 [56]byte //cpu
+	rmButNotDelCnt    uint64   //淘汰内存次数(非正常过期，有值则表示数据落地的协程cpu瓶颈)
+	_                 [56]byte //cpu
+	timerSaveCnt      uint64   //定期协程保存key数
+	_                 [56]byte //cpu
+	RmButNotFind      uint64   //满缓存回调未找到key的次数
 }
 
 func CreateDBProxy(opt Opts) (*Proxy, error) {
@@ -57,16 +60,21 @@ func CreateDBProxy(opt Opts) (*Proxy, error) {
 	proxy := &Proxy{
 		DB:          db,
 		C:           opt.c,
-		IsUseCache:  opt.IsUseCache,
+		isUseCache:  opt.isUseCache,
 		cache:       opt.cache,
 		dbDir:       opt.optBadger.Dir,
 		watchKeyMgr: watchKeyMgr,
 		noSaveMap:   cmap.New(),
 		serializer:  json.NewSerializer(),
+		getKVPool: sync.Pool{
+			New: func() interface{} {
+				return new(badgerApi.KV)
+			},
+		},
 	}
 
 	//移除缓存回调
-	if proxy.IsUseCache {
+	if proxy.isUseCache {
 		*opt.fnRemoveButNotDel = func(key string, entry []byte) {
 			//这里尽量不阻塞! 会影响前台分片的读写锁时间
 			//proxy.waitToRemoveMap.Set(key, nil)
@@ -74,12 +82,11 @@ func CreateDBProxy(opt Opts) (*Proxy, error) {
 				if !exists {
 					return false
 				}
-				atomic.AddUint64(&proxy.RmButNotFind, 1) //TODO 删除
 				return true
 			})
-			//proxy.noSaveMap.Remove(key)
+
 			if !isRm {
-				//atomic.AddUint64(&proxy.RmButNotFind, 1) //TODO 打开
+				atomic.AddUint64(&proxy.RmButNotFind, 1)
 				return
 			}
 
@@ -88,9 +95,8 @@ func CreateDBProxy(opt Opts) (*Proxy, error) {
 			atomic.AddUint64(&proxy.rmButNotDelCnt, 1)
 
 			_ = proxy.DB.Update(func(txn *badger.Txn) error {
-				//TODO 优化不用解析直接判断是否过期
-				var kv badgerApi.KV
-				err = proxy.serializer.Unmarshal(entry, &kv)
+				kv := proxy.getKVPool.Get().(*badgerApi.KV)
+				err = proxy.serializer.Unmarshal(entry, kv)
 				if err != nil {
 					panic(err)
 				}
@@ -160,7 +166,6 @@ func (proxy *Proxy) saveData() {
 				if !exists {
 					return false
 				}
-				atomic.AddUint64(&proxy.RmButNotFind, 1) //TODO 删除
 				return true
 			})
 			//proxy.noSaveMap.Remove(key)
@@ -180,7 +185,7 @@ func (proxy *Proxy) saveData() {
 		if err != nil {
 			panic(err)
 		}
-		//TODO 优化不用解析直接判断是否过期
+
 		e := badger.NewEntry([]byte(key), kv.V)
 		if kv.ExpiresAt > 0 {
 			t := time.Unix(int64(kv.ExpiresAt), 0)
@@ -228,12 +233,12 @@ func (proxy *Proxy) GetDBValue(key string) (*badgerApi.KV, error) {
 	if err != nil {
 		return nil, err
 	}
-	var kv badgerApi.KV
-	err = proxy.serializer.Unmarshal(v, &kv)
+	kv := proxy.getKVPool.Get().(*badgerApi.KV)
+	err = proxy.serializer.Unmarshal(v, kv)
 	if err != nil {
 		return nil, err
 	}
-	return &kv, nil
+	return kv, nil
 }
 
 func (proxy *Proxy) GetSerializer() serialize.Serializer {
@@ -360,9 +365,6 @@ func (proxy *Proxy) GetRMButNotDelCnt() uint64 {
 func (proxy *Proxy) GetTimerSaveCnt() uint64 {
 	return atomic.LoadUint64(&proxy.timerSaveCnt)
 }
-func (proxy *Proxy) GetNoSaveMapFlagCnt() uint64 {
-	return atomic.LoadUint64(&proxy.noSaveMapFlagCnt)
-}
 
 func (proxy *Proxy) GetCachePenetrateRate() float64 {
 	f := float64(proxy.GetCacheCnt())
@@ -374,20 +376,19 @@ func (proxy *Proxy) GetCachePenetrateRate() float64 {
 
 func (proxy *Proxy) get(txn *badger.Txn, key string) *badgerApi.KV {
 	data, err := proxy.cache.Get(key)
-	//TODO 考虑池化kv对象
-	var kv badgerApi.KV
+	kv := proxy.getKVPool.Get().(*badgerApi.KV)
 	kv.K = key
 	if err == nil {
 		atomic.AddUint64(&proxy.cacheCnt, 1)
-		err := proxy.serializer.Unmarshal(data, &kv)
+		err := proxy.serializer.Unmarshal(data, kv)
 		if err != nil {
 			kv.Err = err.Error()
 		}
-		return &kv //命中缓存返回数据
+		return kv //命中缓存返回数据
 	}
 	if err != cachedb.ErrEntryNotFound {
 		kv.Err = err.Error()
-		return &kv
+		return kv
 	}
 
 	atomic.AddUint64(&proxy.cachePenetrateCnt, 1)
@@ -399,17 +400,16 @@ func (proxy *Proxy) get(txn *badger.Txn, key string) *badgerApi.KV {
 		if err == badger.ErrKeyNotFound { //转换错误
 			kv.Err = cachedb.ErrEntryNotFound.Error()
 		}
-		return &kv
+		return kv
 	}
-	v, err := item.ValueCopy(nil)
+	kv.V, err = item.ValueCopy(kv.V)
 	if err != nil {
 		kv.Err = err.Error()
-		return &kv
+		return kv
 	}
-	kv.V = v
 	kv.ExpiresAt = item.ExpiresAt()
 
-	v, err = proxy.serializer.Marshal(kv)
+	v, err := proxy.serializer.Marshal(kv)
 	if err != nil {
 		kv.Err = err.Error()
 	}
@@ -418,17 +418,17 @@ func (proxy *Proxy) get(txn *badger.Txn, key string) *badgerApi.KV {
 	err = proxy.cache.Set(key, v)
 	if err != nil {
 		kv.Err = err.Error()
-		return &kv
+		return kv
 	}
 
-	return &kv
+	return kv
 }
 
 func (proxy *Proxy) Gets(keys []string) (result []*badgerApi.KV, version uint32) {
 	txn := proxy.DB.NewTransaction(false)
 	defer txn.Discard()
 
-	if proxy.IsUseCache {
+	if proxy.isUseCache {
 		for _, key := range keys {
 			result = append(result, proxy.get(txn, key))
 		}
@@ -440,7 +440,7 @@ func (proxy *Proxy) Gets(keys []string) (result []*badgerApi.KV, version uint32)
 
 func (proxy *Proxy) getDb(keys []string, txn *badger.Txn, result []*badgerApi.KV) []*badgerApi.KV {
 	for _, key := range keys {
-		var kv badgerApi.KV //TODO 考虑池化kv对象
+		kv := proxy.getKVPool.Get().(*badgerApi.KV)
 		kv.K = key
 		item, err := txn.Get([]byte(key))
 		if err != nil {
@@ -449,14 +449,13 @@ func (proxy *Proxy) getDb(keys []string, txn *badger.Txn, result []*badgerApi.KV
 				kv.Err = cachedb.ErrEntryNotFound.Error()
 			}
 		} else {
-			v, err := item.ValueCopy(nil)
+			kv.V, err = item.ValueCopy(kv.V)
 			if err != nil {
 				kv.Err = err.Error()
 			}
-			kv.V = v
 			kv.ExpiresAt = item.ExpiresAt()
 		}
-		result = append(result, &kv)
+		result = append(result, kv)
 	}
 	return result
 }
@@ -467,7 +466,7 @@ func (proxy *Proxy) GetsByWatch(watchKey string, keys []string) (result []*badge
 		txn := proxy.DB.NewTransaction(false)
 		defer txn.Discard()
 
-		if proxy.IsUseCache {
+		if proxy.isUseCache {
 			for _, key := range keys {
 				result = append(result, proxy.get(txn, key))
 			}
@@ -489,13 +488,11 @@ func (proxy *Proxy) set(kv *badgerApi.KV) error {
 	}); err != nil {
 		return err
 	}
-	atomic.AddUint64(&proxy.noSaveMapFlagCnt, 1)
 	return nil
 }
 
-// Sets TODO 改protobuf结构参数
 func (proxy *Proxy) Sets(kvs []badgerApi.KV) error {
-	if proxy.IsUseCache {
+	if proxy.isUseCache {
 		for i := 0; i < len(kvs); i++ {
 			err := proxy.set(&kvs[i])
 			if err != nil {

@@ -2,11 +2,9 @@ package main
 
 import (
 	"fmt"
-	"github.com/dgraph-io/badger/v3"
 	"github.com/shopspring/decimal"
 	"gopkg.in/alecthomas/kingpin.v2"
 	"log"
-	"math/rand"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
@@ -37,131 +35,6 @@ type Collect struct {
 }
 
 var revMsgCnt int64
-
-func fnBatchUpdate(db *badger.DB, info *Collect, id int, dataLen int) error {
-	wb := db.NewWriteBatch()
-	defer wb.Cancel()
-
-	data := func(l int) []byte {
-		m := make([]byte, l)
-		_, err := rand.Read(m)
-		if err != nil {
-			panic(err)
-		}
-		return m
-	}
-	insertData := data(dataLen)
-	beginTm := time.Now()
-	if err := wb.Set([]byte("Role_"+strconv.Itoa(10000000+id)), insertData); err != nil {
-		return err
-	}
-	if err := wb.Set([]byte("Item_"+strconv.Itoa(10000000+id)), insertData); err != nil {
-		return err
-	}
-	if err := wb.Set([]byte("Build_"+strconv.Itoa(10000000+id)), insertData); err != nil {
-		return err
-	}
-	if err := wb.Set([]byte("Home_"+strconv.Itoa(10000000+id)), insertData); err != nil {
-		return err
-	}
-	if err := wb.Set([]byte("Map_"+strconv.Itoa(10000000+id)), insertData); err != nil {
-		return err
-	}
-	if err := wb.Flush(); err != nil {
-		return err
-	}
-	diffMS := time.Since(beginTm).Milliseconds()
-	diffMic := time.Since(beginTm).Microseconds()
-	info.totalMic += diffMic
-	if diffMS > info.maxMs {
-		info.maxMs = diffMS
-	}
-	if diffMS >= 10 {
-		info.bigger10MsCount++
-
-		if diffMS >= 100 {
-			info.bigger100MsCount++
-
-			if diffMS >= 300 {
-				info.bigger300MsCount++
-
-				if diffMS >= 1000 {
-					info.bigger1SecCount++
-				}
-			}
-		}
-	}
-	info.setCount++
-	return nil
-}
-func fnBatchRead(db *badger.DB, info *Collect, id int) error {
-	txn := db.NewTransaction(false)
-	defer txn.Discard()
-
-	key1 := []byte("Role_" + strconv.Itoa(10000000+id))
-	key2 := []byte("Item_" + strconv.Itoa(10000000+id))
-	key3 := []byte("Build_" + strconv.Itoa(10000000+id))
-	key4 := []byte("Home_" + strconv.Itoa(10000000+id))
-	key5 := []byte("Map_" + strconv.Itoa(10000000+id))
-
-	beginTm := time.Now()
-	var val []byte
-	item, err := txn.Get(key1)
-	if err != nil {
-		return err
-	}
-	val, err = item.ValueCopy(nil)
-	item, err = txn.Get(key2)
-	if err != nil {
-		return err
-	}
-	val, err = item.ValueCopy(nil)
-	item, err = txn.Get(key3)
-	if err != nil {
-		return err
-	}
-	val, err = item.ValueCopy(nil)
-	item, err = txn.Get(key4)
-	if err != nil {
-		return err
-	}
-	val, err = item.ValueCopy(nil)
-	item, err = txn.Get(key5)
-	if err != nil {
-		return err
-	}
-	val, err = item.ValueCopy(nil)
-	if err != nil {
-		return err
-	}
-
-	noUse := func(val []byte) {
-	}
-	noUse(val)
-	diffMS := time.Since(beginTm).Milliseconds()
-	diffMic := time.Since(beginTm).Microseconds()
-	info.totalMic += diffMic
-	if diffMS > info.maxMs {
-		info.maxMs = diffMS
-	}
-	if diffMS >= 10 {
-		info.bigger10MsCount++
-
-		if diffMS >= 100 {
-			info.bigger100MsCount++
-
-			if diffMS >= 300 {
-				info.bigger300MsCount++
-
-				if diffMS >= 1000 {
-					info.bigger1SecCount++
-				}
-			}
-		}
-	}
-	info.setCount++
-	return nil
-}
 
 func fnBatchUpdate2(db *proxy.Proxy, info *Collect, id int, dataLen int, version uint32, isCheckVersion bool) error {
 	insertData := util.RandData(dataLen)
@@ -439,7 +312,8 @@ func main() {
 
 	chId := make(chan int, 1024*80)
 	totalSendCnt := int64(0)
-	isClose := false
+	var isClose atomic.Value
+	isClose.Store(false)
 
 	//消费协程
 	work(proxyDB, *coroutines, *op, chId, dataLen, &totalSendCnt)
@@ -482,7 +356,7 @@ func main() {
 		cntShould := limit
 		for {
 			for id := curBeginId; id < curBeginId+onlineNum; id++ {
-				if isClose {
+				if isClose.Load().(bool) {
 					log.Println("send check was closed!...")
 					return
 				}
@@ -517,7 +391,7 @@ func main() {
 			log.Printf("begin insert num[%d]\n", *kInsertNum)
 			curBeginId := *kCurBeginId
 			for i := 0; i < *kInsertNum; i++ {
-				if isClose {
+				if isClose.Load().(bool) {
 					return
 				}
 				chId <- curBeginId + i
@@ -561,7 +435,7 @@ func main() {
 	case <-sg:
 		fmt.Println("the app will shutdown.")
 		proxyDB.C.CTXCancel()
-		isClose = true
+		isClose.Store(true)
 		<-chExitInfo
 	}
 
@@ -585,7 +459,6 @@ func main() {
 
 	fmt.Printf("GetCachePenetrateCnt: %d\n", proxyDB.GetCachePenetrateCnt())
 	fmt.Printf("revMsgCnt: %d\n", atomic.LoadInt64(&revMsgCnt))
-	fmt.Printf("noSaveMapFlagCnt: %d\n", proxyDB.GetNoSaveMapFlagCnt())
 	fmt.Printf("RMButNotDelCnt: %d\n", proxyDB.GetRMButNotDelCnt())
 	fmt.Printf("timerSaveCnt: %d\n", proxyDB.GetTimerSaveCnt())
 	fmt.Printf("RmButNotFind: %d\n", atomic.LoadUint64(&proxyDB.RmButNotFind))

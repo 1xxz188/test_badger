@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/golang/groupcache/singleflight"
+	json "github.com/json-iterator/go"
 	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/require"
 	"io/ioutil"
@@ -339,4 +340,33 @@ func TestFnCallFn(t *testing.T) {
 		require.Equal(t, []byte("my"), entry)
 	}
 	op.fn("you", []byte("my"))
+}
+
+func BenchmarkUnmarshal(b *testing.B) {
+	buf := make([]byte, 128)
+	for n := 0; n < b.N; n++ {
+		stu := &badgerApi.KV{}
+		err := json.Unmarshal(buf, stu)
+		if err != nil {
+			panic(err)
+		}
+	}
+}
+
+func BenchmarkUnmarshalWithPool(b *testing.B) {
+	buf := make([]byte, 128)
+	var studentPool = sync.Pool{
+		New: func() interface{} {
+			return new(badgerApi.KV)
+		},
+	}
+
+	for n := 0; n < b.N; n++ {
+		stu := studentPool.Get().(*badgerApi.KV)
+		err := json.Unmarshal(buf, stu)
+		if err != nil {
+			panic(err)
+		}
+		studentPool.Put(stu)
+	}
 }
