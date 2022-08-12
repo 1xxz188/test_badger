@@ -6,22 +6,26 @@ import (
 	"github.com/golang/groupcache/singleflight"
 	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/require"
+	"io/ioutil"
 	"strconv"
 	"sync"
 	"sync/atomic"
 	"test_badger/badgerApi"
 	"test_badger/cachedb"
 	"test_badger/controlEXE"
+	"test_badger/customWatchKey"
 	"test_badger/util"
 	"testing"
 	"time"
 )
 
 func TestReadDB(t *testing.T) {
-	util.RemoveDir("./data")
-	defer util.RemoveDir("./data")
+	dir, err := ioutil.TempDir("./", "badger-test")
+	require.NoError(t, err)
+	defer util.RemoveDir(dir)
+
 	fn1 := func() {
-		proxy, err := CreateDBProxy(DefaultOptions("./data"))
+		proxy, err := CreateDBProxy(DefaultOptions(dir))
 		require.NoError(t, err)
 		defer func() {
 			err := proxy.Close()
@@ -35,7 +39,7 @@ func TestReadDB(t *testing.T) {
 		require.Equal(t, uint32(1), version)
 		for _, kv := range kvList {
 			//t.Logf("[%d] %+v\n", i, kv)
-			require.Equal(t, cachedb.ErrEntryNotFound, kv.Err)
+			require.Equal(t, cachedb.ErrEntryNotFound.Error(), kv.Err)
 		}
 
 		kvs := append([]badgerApi.KV(nil), badgerApi.KV{
@@ -49,7 +53,7 @@ func TestReadDB(t *testing.T) {
 		require.Equal(t, 1, len(kvList))
 		require.Equal(t, uint32(2), version)
 		for _, kv := range kvList {
-			require.Equal(t, nil, kv.Err)
+			require.Equal(t, "", kv.Err)
 		}
 
 		kvs[0].V = []byte("v2")
@@ -65,7 +69,7 @@ func TestReadDB(t *testing.T) {
 	}
 
 	fn2 := func() {
-		proxy, err := CreateDBProxy(DefaultOptions("./data"))
+		proxy, err := CreateDBProxy(DefaultOptions(dir))
 		require.NoError(t, err)
 
 		defer func() {
@@ -82,7 +86,7 @@ func TestReadDB(t *testing.T) {
 		require.Equal(t, uint32(1), version)
 		for _, kv := range kvList {
 			//t.Logf("[%d] %+v\n", i, kv)
-			require.Equal(t, nil, kv.Err)
+			require.Equal(t, "", kv.Err)
 			require.Equal(t, []byte("v2"), kv.V)
 		}
 
@@ -98,9 +102,11 @@ func TestReadDB(t *testing.T) {
 }
 
 func TestSave(t *testing.T) {
-	util.RemoveDir("./data")
-	defer util.RemoveDir("./data")
-	proxy, err := CreateDBProxy(DefaultOptions("./data"))
+	dir, err := ioutil.TempDir("./", "badger-test")
+	require.NoError(t, err)
+	defer util.RemoveDir(dir)
+
+	proxy, err := CreateDBProxy(DefaultOptions(dir))
 	defer func() {
 		err := proxy.Close()
 		require.NoError(t, err)
@@ -135,7 +141,9 @@ func TestSave(t *testing.T) {
 
 	setCnt := uint32(0)
 	chPrintGo := make(chan struct{})
+	proxy.C.AllAdd(1)
 	go func() {
+		defer proxy.C.AllDone()
 		lastCnt := uint32(0)
 		ticker := time.NewTicker(time.Second)
 		proxy.C.AllAdd(1)
@@ -172,6 +180,9 @@ func TestSave(t *testing.T) {
 					select {
 					case _ = <-ticker.C:
 						count++
+						if count > 3 {
+							return
+						}
 						//now := time.Now()
 						var kvs []badgerApi.KV
 
@@ -182,12 +193,17 @@ func TestSave(t *testing.T) {
 							})
 						}
 						watchKey := fmt.Sprintf("watchKey_%d", idx)
+						watchVersion := uint32(0)
 						err = proxy.watchKeyMgr.Read(watchKey, func(keyVersion uint32) error {
+							watchVersion = keyVersion
 							return nil
 						})
 						require.NoError(t, err)
-						err = proxy.Sets(watchKey, kvs)
-						require.NoError(t, err)
+						err = proxy.SetsByWatch(watchKey, watchVersion, kvs)
+						if err != nil && err != customWatchKey.ErrWatchVersionConflicts {
+							t.Error(err)
+							return
+						}
 						atomic.AddUint32(&setCnt, 1)
 						//fmt.Printf("Set cost[%d ms]\n", time.Since(now).Milliseconds())
 						//time.Sleep(time.Second)
@@ -204,8 +220,8 @@ func TestSave(t *testing.T) {
 		}
 	}
 
-	<-proxy.C.CTXDone()
-	proxy.C.ConsumerWait()
+	proxy.C.ProducerWait()
+	proxy.C.CTXCancel()
 	close(chPrintGo)
 	proxy.C.AllWait()
 	fmt.Println("Main Exit...")

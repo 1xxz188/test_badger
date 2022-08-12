@@ -11,7 +11,6 @@ import (
 	"test_badger/badgerApi"
 	"test_badger/proxy"
 	"test_badger/util"
-	"test_badger/web"
 	"testing"
 	"time"
 )
@@ -22,54 +21,6 @@ func getTestOptions(dir string) badger.Options {
 		WithLoggingLevel(badger.WARNING).
 		WithDetectConflicts(false)
 	return opt
-}
-func removeDir(dir string) {
-	if err := os.RemoveAll(dir); err != nil {
-		panic(err)
-	}
-}
-
-func TestInsert(t *testing.T) {
-	db, err := badger.Open(badger.DefaultOptions("./data"))
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer func() {
-		_ = db.Close()
-	}()
-
-	var info Collect
-
-	if err := fnBatchUpdate(db, &info, 1, 128); err != nil {
-		t.Error(err)
-	}
-	if err := fnBatchUpdate(db, &info, 2, 128); err != nil {
-		t.Error(err)
-	}
-	if err := fnBatchUpdate(db, &info, 2, 128); err != nil {
-		t.Error(err)
-	}
-}
-
-func TestPrintVersion(t *testing.T) {
-	db, err := badger.Open(badger.DefaultOptions("./myDb"))
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer func() {
-		_ = db.Close()
-	}()
-
-	var info Collect
-	if err := fnBatchRead(db, &info, 1); err != nil {
-		t.Error(err)
-	}
-	if err := fnBatchRead(db, &info, 2); err != nil {
-		t.Error(err)
-	}
-	if err := fnBatchRead(db, &info, 100010); err != nil {
-		t.Error(err)
-	}
 }
 
 func TestInsertVlog(t *testing.T) {
@@ -135,7 +86,7 @@ func TestInsertVlog(t *testing.T) {
 func TestGC(t *testing.T) {
 	dir, err := ioutil.TempDir("./", "badger-test")
 	require.NoError(t, err)
-	defer removeDir(dir)
+	defer util.RemoveDir(dir)
 
 	// Do not change any of the options below unless it's necessary.
 	opts := getTestOptions(dir)
@@ -178,10 +129,11 @@ func TestGC(t *testing.T) {
 }
 
 func TestBackup(t *testing.T) {
-	//srcDir, err := os.MkdirTemp("./", "data")
-	//require.NoError(t, err)
-	//defer removeDir(srcDir)
-	db, err := badger.Open(getTestOptions("./data"))
+	dir, err := ioutil.TempDir("./", "badger-test")
+	require.NoError(t, err)
+	defer util.RemoveDir(dir)
+
+	db, err := badger.Open(getTestOptions(dir))
 	require.NoError(t, err)
 
 	// Write some stuff
@@ -231,7 +183,9 @@ func TestBackup(t *testing.T) {
 	//defer removeDir(srcDir)
 	//bakFile, err := ioutil.TempFile(dirBak, "badgerbak")
 	//require.NoError(t, err)
-	_ = os.Mkdir("./badgerbak-test", 0777)
+	err = os.Mkdir("./badgerbak-test", 0777)
+	require.NoError(t, err)
+	defer util.RemoveDir("./badgerbak-test")
 	//如果文件是以追加打开O_APPEND，则Backup的since参数应该也要和最后一次同步的version保持一致，保持增量。否则数据会有副本(但不会出错就是了)，就是浪费空间而已。
 	//如果文件是新建O_TRUNC，则Backup的since参数=0
 	//备份是按版本号来存的，如果原库版本号小于备份库里的 则数据会被忽略掉。只有大于备份库里的版本号才会被更新
@@ -268,7 +222,11 @@ func TestBackup(t *testing.T) {
 }
 
 func TestDBCount(t *testing.T) {
-	db, err := badger.Open(badger.DefaultOptions("./data"))
+	dir, err := ioutil.TempDir("./", "badger-test")
+	require.NoError(t, err)
+	defer util.RemoveDir(dir)
+
+	db, err := badger.Open(badger.DefaultOptions(dir))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -287,7 +245,11 @@ func TestDBCount(t *testing.T) {
 }
 
 func TestPrint(t *testing.T) {
-	proxyDB, err := proxy.CreateDBProxy(proxy.DefaultOptions("./data"))
+	dir, err := ioutil.TempDir("./", "badger-test")
+	require.NoError(t, err)
+	defer util.RemoveDir(dir)
+
+	proxyDB, err := proxy.CreateDBProxy(proxy.DefaultOptions(dir))
 	require.NoError(t, err)
 	defer func() {
 		err := proxyDB.Close()
@@ -295,15 +257,4 @@ func TestPrint(t *testing.T) {
 	}()
 
 	badgerApi.Print(proxyDB.DB)
-}
-
-func TestWeb(t *testing.T) {
-	proxyDB, err := proxy.CreateDBProxy(proxy.DefaultOptions("./data"))
-	require.NoError(t, err)
-	defer func() {
-		err := proxyDB.Close()
-		require.NoError(t, err)
-	}()
-	//开启网页查询
-	web.RunWeb("0.0.0.0:11001", proxyDB)
 }

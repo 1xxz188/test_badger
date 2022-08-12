@@ -205,6 +205,7 @@ func (proxy *Proxy) saveData() {
 }
 
 func (proxy *Proxy) Close() error {
+	proxy.C.CTXCancel()    //触发退出信号
 	proxy.C.ProducerWait() //等待生产消息退出
 	proxy.C.ConsumerWait() //等待数据落地
 	proxy.C.AllWait()      //等待GC结束
