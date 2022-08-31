@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/dgraph-io/badger/v3"
 	cmap "github.com/orcaman/concurrent-map"
+	"github.com/valyala/bytebufferpool"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -98,15 +99,17 @@ func CreateDBProxy(opt Opts) (*Proxy, error) {
 			atomic.AddUint64(&proxy.rmButNotDelCnt, 1)
 
 			_ = proxy.DB.Update(func(txn *badger.Txn) error {
-				kv := proxy.getKVPool.Get().(*badgerApi.KV)
+				/*kv := proxy.getKVPool.Get().(*badgerApi.KV)
 				err = proxy.serializer.Unmarshal(entry, kv)
 				if err != nil {
 					panic(err)
-				}
+				}*/
+				expiresAt := util.BytesToUint64(entry[0:cachedb.HeadLen])
+				v := entry[cachedb.HeadLen:]
 
-				e := badger.NewEntry([]byte(key), kv.V)
-				if kv.ExpiresAt > 0 {
-					t := time.Unix(int64(kv.ExpiresAt), 0)
+				e := badger.NewEntry([]byte(key), v)
+				if expiresAt > 0 {
+					t := time.Unix(int64(expiresAt), 0)
 					diffSec := time.Now().Sub(t).Seconds()
 					if diffSec < 1 {
 						return nil
@@ -181,12 +184,14 @@ func (proxy *Proxy) saveData() {
 			continue
 		}
 
+		kv.ExpiresAt = util.BytesToUint64(v[0:cachedb.HeadLen])
+		kv.V = v[cachedb.HeadLen:]
 		// maxBatchCount int64 // max entries in batch    ---> 10w  MaxBatchSize()
 		// maxBatchSize  int64 // max batch size in bytes ---> 9.5MB MaxBatchSize()
-		err = proxy.serializer.Unmarshal(v, &kv)
+		/*err = proxy.serializer.Unmarshal(v, &kv)
 		if err != nil {
 			panic(err)
-		}
+		}*/
 
 		e := badger.NewEntry([]byte(key), kv.V)
 		if kv.ExpiresAt > 0 {
@@ -386,10 +391,12 @@ func (proxy *Proxy) get(txn *badger.Txn, key string) (*badger.Txn, *badgerApi.KV
 	kv.K = key
 	if err == nil {
 		atomic.AddUint64(&proxy.cacheCnt, 1)
-		err := proxy.serializer.Unmarshal(data, kv)
+		kv.ExpiresAt = util.BytesToUint64(data[0:cachedb.HeadLen])
+		kv.V = data[cachedb.HeadLen:]
+		/*err := proxy.serializer.Unmarshal(data, kv)
 		if err != nil {
 			kv.Err = err.Error()
-		}
+		}*/
 		return txn, kv //命中缓存返回数据
 	}
 	if err != cachedb.ErrEntryNotFound {
@@ -425,13 +432,26 @@ func (proxy *Proxy) get(txn *badger.Txn, key string) (*badger.Txn, *badgerApi.KV
 
 	kv.ExpiresAt = item.ExpiresAt()
 
-	v, err := proxy.serializer.Marshal(kv)
+	//更新到缓存中
+	b := bytebufferpool.Get()
+	defer bytebufferpool.Put(b)
+	_, err = b.Write(util.Uint64ToBytes(kv.ExpiresAt))
 	if err != nil {
 		kv.Err = err.Error()
+		return txn, kv
+	}
+	_, err = b.Write(kv.V)
+	if err != nil {
+		kv.Err = err.Error()
+		return txn, kv
 	}
 
-	//更新到缓存中
-	err = proxy.cache.Set(key, v)
+	/*v, err := proxy.serializer.Marshal(kv)
+	if err != nil {
+		kv.Err = err.Error()
+	}*/
+
+	err = proxy.cache.Set(key, b.Bytes())
 	if err != nil {
 		kv.Err = err.Error()
 		return txn, kv
@@ -493,11 +513,22 @@ func (proxy *Proxy) GetsByWatch(watchKey string, keys []string) (result []*badge
 }
 
 func (proxy *Proxy) set(kv *badgerApi.KV) error {
-	v, err := proxy.serializer.Marshal(kv)
+	b := bytebufferpool.Get()
+	defer bytebufferpool.Put(b)
+	_, err := b.Write(util.Uint64ToBytes(kv.ExpiresAt))
 	if err != nil {
 		return err
 	}
-	if err := proxy.cache.SetCb(kv.K, v, func() {
+	_, err = b.Write(kv.V)
+	if err != nil {
+		return err
+	}
+
+	/*v, err := proxy.serializer.Marshal(kv)
+	if err != nil {
+		return err
+	}*/
+	if err := proxy.cache.SetCb(kv.K, b.Bytes(), func() {
 		proxy.noSaveMap.Set(kv.K, nil)
 	}); err != nil {
 		return err

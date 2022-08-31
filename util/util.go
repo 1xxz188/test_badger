@@ -1,6 +1,8 @@
 package util
 
 import (
+	"bytes"
+	"encoding/binary"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -46,4 +48,25 @@ func RandData(l int) []byte {
 		panic(err)
 	}
 	return m
+}
+
+// Uint64ToBytes 整形转换成字节
+func Uint64ToBytes(n uint64) []byte {
+	bytesBuffer := bytes.NewBuffer([]byte{})
+	err := binary.Write(bytesBuffer, binary.BigEndian, n)
+	if err != nil {
+		panic(err)
+	}
+	return bytesBuffer.Bytes()
+}
+
+// BytesToUint64 字节转换成整形
+func BytesToUint64(b []byte) uint64 {
+	bytesBuffer := bytes.NewBuffer(b)
+	var x uint64
+	err := binary.Read(bytesBuffer, binary.BigEndian, &x)
+	if err != nil {
+		panic(err)
+	}
+	return x
 }

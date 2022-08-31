@@ -258,16 +258,3 @@ func TestPrint(t *testing.T) {
 
 	badgerApi.Print(proxyDB.DB)
 }
-
-func TestTime(t *testing.T) {
-	var txn *int //txn := proxy.DB.NewTransaction(false)
-
-	defer func() {
-		if txn != nil {
-			*txn = 1234
-		}
-		fmt.Println(*txn)
-	}()
-	a := 1234
-	txn = &a
-}

@@ -2,3 +2,4 @@
 /.idea/
 *.exe
 /test_badger_bigcache_arm64
+/examples/selfTest/data

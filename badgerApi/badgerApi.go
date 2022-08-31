@@ -44,6 +44,7 @@ import (
 	"github.com/dgraph-io/badger/v3"
 )
 
+//KV 结构
 type KV struct {
 	K         string `json:"key"`
 	V         []byte `json:"value"`

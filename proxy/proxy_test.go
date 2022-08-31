@@ -7,6 +7,7 @@ import (
 	json "github.com/json-iterator/go"
 	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/require"
+	"github.com/valyala/bytebufferpool"
 	"io/ioutil"
 	"strconv"
 	"sync"
@@ -369,4 +370,27 @@ func BenchmarkUnmarshalWithPool(b *testing.B) {
 		}
 		studentPool.Put(stu)
 	}
+}
+
+func TestPoolByte(t *testing.T) {
+	kv := badgerApi.KV{
+		K:         "test_key",
+		V:         []byte("test_v"),
+		ExpiresAt: 1234,
+	}
+	buff := bytebufferpool.Get()
+	n, err := buff.Write(util.Uint64ToBytes(kv.ExpiresAt))
+	require.NoError(t, err)
+	require.Equal(t, cachedb.HeadLen, n)
+
+	n, err = buff.Write(kv.V)
+	require.NoError(t, err)
+	require.Equal(t, len(kv.V), n)
+
+	at := util.BytesToUint64(buff.Bytes()[0:8])
+	require.Equal(t, kv.ExpiresAt, at)
+
+	v := buff.Bytes()[8:]
+	require.Equal(t, kv.V, v)
+	bytebufferpool.Put(buff)
 }

@@ -22,6 +22,13 @@ const (
 	UnknownReason = RemoveReason(4)
 )
 
+// HeadLen 在缓存中v结构
+/*
+	uint64 		| value
+	ExpiresAt 	| value
+*/
+var HeadLen int = 8
+
 type SetCb func()
 type GetCb func()
 
