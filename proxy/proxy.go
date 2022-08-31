@@ -36,6 +36,7 @@ type Proxy struct {
 	getKVPool   sync.Pool                   //获取请求对象池
 	serializer  serialize.Serializer
 
+	flushDbMxMs       int64
 	cachePenetrateCnt uint64   //缓存穿透次数
 	_                 [56]byte //cpu
 	cacheCnt          uint64   //缓存命中次数
@@ -119,7 +120,7 @@ func CreateDBProxy(opt Opts) (*Proxy, error) {
 		go func() {
 			defer proxy.C.ConsumerDone()
 			//interval save
-			ticker := time.NewTicker(time.Second)
+			ticker := time.NewTicker(time.Second * 10)
 			defer ticker.Stop()
 
 			for {
@@ -180,7 +181,6 @@ func (proxy *Proxy) saveData() {
 
 		// maxBatchCount int64 // max entries in batch    ---> 10w  MaxBatchSize()
 		// maxBatchSize  int64 // max batch size in bytes ---> 9.5MB MaxBatchSize()
-
 		err = proxy.serializer.Unmarshal(v, &kv)
 		if err != nil {
 			panic(err)
@@ -206,7 +206,11 @@ func (proxy *Proxy) saveData() {
 	if err = wb.Flush(); err != nil {
 		panic(err)
 	}
-	fmt.Printf(">save key size[%d] snapshot[%d ms] range[%d ms] Flush[%d ms] total[%d ms]\n", len(toSave), snapshotMs, rangeMs, time.Since(now).Milliseconds(), time.Since(startTm).Milliseconds())
+	flushTm := time.Since(now).Milliseconds()
+	if proxy.flushDbMxMs < flushTm {
+		proxy.flushDbMxMs = flushTm
+	}
+	fmt.Printf(">save key size[%d] snapshot[%d ms] range[%d ms] Flush[%d ms][%d ms]  total[%d ms]\n", len(toSave), snapshotMs, rangeMs, flushTm, proxy.flushDbMxMs, time.Since(startTm).Milliseconds())
 }
 
 func (proxy *Proxy) Close() error {
@@ -374,7 +378,7 @@ func (proxy *Proxy) GetCachePenetrateRate() float64 {
 	return float64(proxy.GetCachePenetrateCnt()) / float64(proxy.GetCacheCnt())
 }
 
-func (proxy *Proxy) get(txn *badger.Txn, key string) *badgerApi.KV {
+func (proxy *Proxy) get(txn *badger.Txn, key string) (*badger.Txn, *badgerApi.KV) {
 	data, err := proxy.cache.Get(key)
 	kv := proxy.getKVPool.Get().(*badgerApi.KV)
 	kv.K = key
@@ -384,15 +388,23 @@ func (proxy *Proxy) get(txn *badger.Txn, key string) *badgerApi.KV {
 		if err != nil {
 			kv.Err = err.Error()
 		}
-		return kv //命中缓存返回数据
+		return txn, kv //命中缓存返回数据
 	}
 	if err != cachedb.ErrEntryNotFound {
 		kv.Err = err.Error()
-		return kv
+		return txn, kv
 	}
 
 	atomic.AddUint64(&proxy.cachePenetrateCnt, 1)
 
+	if txn == nil {
+		now := time.Now()
+		txn = proxy.DB.NewTransaction(false) //在发生击穿时申请，此函数可能阻塞。注意： 在函数外txn.Discard()
+		diff3 := time.Since(now).Milliseconds()
+		if diff3 > 1000 {
+			fmt.Printf("proxy.DB.NewTransaction(false) get(%s) cost: %d ms\n", key, diff3)
+		}
+	}
 	//穿透到badger
 	item, err := txn.Get([]byte(key))
 	if err != nil {
@@ -400,13 +412,15 @@ func (proxy *Proxy) get(txn *badger.Txn, key string) *badgerApi.KV {
 		if err == badger.ErrKeyNotFound { //转换错误
 			kv.Err = cachedb.ErrEntryNotFound.Error()
 		}
-		return kv
+		return txn, kv
 	}
+
 	kv.V, err = item.ValueCopy(kv.V)
 	if err != nil {
 		kv.Err = err.Error()
-		return kv
+		return txn, kv
 	}
+
 	kv.ExpiresAt = item.ExpiresAt()
 
 	v, err := proxy.serializer.Marshal(kv)
@@ -418,27 +432,34 @@ func (proxy *Proxy) get(txn *badger.Txn, key string) *badgerApi.KV {
 	err = proxy.cache.Set(key, v)
 	if err != nil {
 		kv.Err = err.Error()
-		return kv
+		return txn, kv
 	}
 
-	return kv
+	return txn, kv
 }
 
 func (proxy *Proxy) Gets(keys []string) (result []*badgerApi.KV) {
-	txn := proxy.DB.NewTransaction(false)
-	defer txn.Discard()
-
 	if proxy.isUseCache {
+		var txn *badger.Txn //txn := proxy.DB.NewTransaction(false)
+		defer func() {
+			if txn != nil {
+				txn.Discard()
+			}
+		}()
+		var kv *badgerApi.KV
 		for _, key := range keys {
-			result = append(result, proxy.get(txn, key))
+			txn, kv = proxy.get(txn, key)
+			result = append(result, kv)
 		}
 		return result
 	}
-
-	return proxy.getDb(keys, txn, result)
+	return proxy.getDb(keys, result)
 }
 
-func (proxy *Proxy) getDb(keys []string, txn *badger.Txn, result []*badgerApi.KV) []*badgerApi.KV {
+func (proxy *Proxy) getDb(keys []string, result []*badgerApi.KV) []*badgerApi.KV {
+	txn := proxy.DB.NewTransaction(false)
+	defer txn.Discard()
+
 	for _, key := range keys {
 		kv := proxy.getKVPool.Get().(*badgerApi.KV)
 		kv.K = key

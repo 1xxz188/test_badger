@@ -13,3 +13,6 @@ selfTest --op="get-set" -c 12 --dataSize=1024 --onlineNum=10000 --stepId=200 --s
 3.事务读写使用缓存能提高约4倍性能.(具体参考doc)
 
 ## 其他具体数值测试参考doc目录下的文档.
+
+## TODO:
+1. 退出时，执行低废弃率的的GC释放(0.2)?
