@@ -35,8 +35,9 @@ type Proxy struct {
 	noSaveMap   cmap.ConcurrentMap          //待保存列表
 	getKVPool   sync.Pool                   //获取请求对象池
 	serializer  serialize.Serializer
+	flushDbSec  int32 //数据落盘间隔
+	flushDbMxMs int64
 
-	flushDbMxMs       int64
 	cachePenetrateCnt uint64   //缓存穿透次数
 	_                 [56]byte //cpu
 	cacheCnt          uint64   //缓存命中次数
@@ -64,6 +65,7 @@ func CreateDBProxy(opt Opts) (*Proxy, error) {
 		isUseCache:  opt.isUseCache,
 		cache:       opt.cache,
 		dbDir:       opt.optBadger.Dir,
+		flushDbSec:  opt.flushDbSec,
 		watchKeyMgr: watchKeyMgr,
 		noSaveMap:   cmap.New(),
 		serializer:  json.NewSerializer(),
@@ -120,7 +122,7 @@ func CreateDBProxy(opt Opts) (*Proxy, error) {
 		go func() {
 			defer proxy.C.ConsumerDone()
 			//interval save
-			ticker := time.NewTicker(time.Second * 10)
+			ticker := time.NewTicker(time.Second * time.Duration(proxy.flushDbSec))
 			defer ticker.Stop()
 
 			for {

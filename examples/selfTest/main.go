@@ -252,6 +252,7 @@ func main() {
 	coroutines := kingpin.Flag("coroutines", "logic coroutines for client").Short('c').Default("4").Int()
 	dataSize := kingpin.Flag("dataSize", "data size of send").Default("128").Int()
 	kGcRate := kingpin.Flag("gcRate", "gc for value log").Default("0.7").Float64()
+	kFlushDbSec := kingpin.Flag("flushDbSec", "flush db data second").Default("10").Int32()
 
 	//insert
 	kInsertNum := kingpin.Flag("insertNum", "[insert] insert num").Default("2000000").Int()
@@ -282,17 +283,17 @@ func main() {
 	}()
 
 	openTm := time.Now()
-	log.Printf("openTm[%d ms] dataLen[%d], lsmMaxValue[%d] noUseCache[%t]\n", time.Since(openTm).Milliseconds(), dataLen, *lsmMaxValue, *kNoUseCache)
+	log.Printf("openTm[%d ms] dataLen[%d], lsmMaxValue[%d] noUseCache[%t] flushDbSec[%d sec]\n", time.Since(openTm).Milliseconds(), dataLen, *lsmMaxValue, *kNoUseCache, *kFlushDbSec)
 
 	var proxyDB *proxy.Proxy
 	var err error
 	if *kNoUseCache {
-		proxyDB, err = proxy.CreateDBProxy(proxy.DefaultNoCache("./data"))
+		proxyDB, err = proxy.CreateDBProxy(proxy.DefaultNoCache("./data").WithFlushDbSec(*kFlushDbSec))
 		if err != nil {
 			panic(err)
 		}
 	} else {
-		proxyDB, err = proxy.CreateDBProxy(proxy.DefaultOptions("./data"))
+		proxyDB, err = proxy.CreateDBProxy(proxy.DefaultOptions("./data").WithFlushDbSec(*kFlushDbSec))
 		if err != nil {
 			panic(err)
 		}
