@@ -102,7 +102,7 @@ func fnBatchUpdate2(db *proxy.Proxy, info *Collect, id int, dataLen int, version
 	info.setCount++
 	return nil
 }
-func fnBatchRead2(db *proxy.Proxy, info *Collect, id int) (uint32, error) { //return (version, err)
+func fnBatchRead2(db *proxy.Proxy, info *Collect, id int, isCheckVersion bool) (uint32, error) { //return (version, err)
 	keyList := append([]string(nil),
 		"Role_"+strconv.Itoa(10000000+id),
 		"Item_"+strconv.Itoa(10000000+id),
@@ -114,15 +114,25 @@ func fnBatchRead2(db *proxy.Proxy, info *Collect, id int) (uint32, error) { //re
 	watchKey := "Watch_" + strconv.Itoa(10000000+id)
 	beginTm := time.Now()
 
-	items, version := db.GetsByWatch(watchKey, keyList)
-	if len(items) != len(keyList) {
-		panic("len(items) != len(keyList)")
+	var items []*badgerApi.KV
+	var version uint32
+	if isCheckVersion {
+		items, version = db.GetsByWatch(watchKey, keyList)
+		if len(items) != len(keyList) {
+			panic("len(items) != len(keyList)")
+		}
+	} else {
+		items = db.Gets(keyList)
+		if len(items) != len(keyList) {
+			panic("len(items) != len(keyList)")
+		}
 	}
 	for _, item := range items {
 		if item.Err != "" {
 			logger.Log.Fatalf("id[%d] key[%s] %s", id, item.K, item.Err)
 		}
 	}
+
 	diffMS := time.Since(beginTm).Milliseconds()
 	diffMic := time.Since(beginTm).Microseconds()
 	info.totalMic += diffMic
@@ -196,7 +206,7 @@ func work(proxyDB *proxy.Proxy, coroutines int, op string, chId chan int, dataLe
 				}
 			} else if op == "get" {
 				for id := range chId {
-					if _, err := fnBatchRead2(proxyDB, &getInfo, id); err != nil {
+					if _, err := fnBatchRead2(proxyDB, &getInfo, id, false); err != nil {
 						panic(err)
 					}
 				}
@@ -205,7 +215,7 @@ func work(proxyDB *proxy.Proxy, coroutines int, op string, chId chan int, dataLe
 				for id := range chId {
 					retryCount = 0
 					for {
-						version, err := fnBatchRead2(proxyDB, &getInfo, id)
+						version, err := fnBatchRead2(proxyDB, &getInfo, id, true)
 						if err != nil {
 							panic(err)
 						}
