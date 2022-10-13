@@ -48,7 +48,7 @@ func TestInsertVlog(t *testing.T) {
 		_ = db.Close()
 	}()
 
-	for y := 0; y < 0; y++ {
+	for y := 0; y < 1; y++ {
 		for i := 0; i < 10; i++ {
 			err = db.Update(func(txn *badger.Txn) error {
 				return txn.SetEntry(badger.NewEntry(key(i), data(2048)))
@@ -81,6 +81,8 @@ func TestInsertVlog(t *testing.T) {
 	afterSize, err := util.GetDirSize(dir)
 	require.NoError(t, err)
 	log.Printf("GC>[cost %s] successfulCnt[%d] db_size[%d MB] GC[%d MB]\n", time.Since(beforeTm).String(), successfulCnt, size, size-afterSize)
+	lsmSize, vSize := db.Size()
+	fmt.Printf("after size lsmSize[%d] vSize[%d]\n", lsmSize, vSize)
 }
 
 func TestGC(t *testing.T) {
@@ -90,10 +92,10 @@ func TestGC(t *testing.T) {
 
 	// Do not change any of the options below unless it's necessary.
 	opts := getTestOptions(dir)
-	opts.NumLevelZeroTables = 50
+	/*opts.NumLevelZeroTables = 50
 	opts.NumLevelZeroTablesStall = 51
 	opts.ValueLogMaxEntries = 2
-	opts.ValueThreshold = 2
+	opts.ValueThreshold = 2*/
 	// Setting LoadingMode to mmap seems to cause segmentation fault while closing DB.
 
 	db1, err := badger.Open(opts)
@@ -101,7 +103,9 @@ func TestGC(t *testing.T) {
 	key := func(i int) []byte {
 		return []byte(fmt.Sprintf("%10d", i))
 	}
-	val := []byte{1, 1, 1, 1, 1, 1, 1, 1}
+	lsmSize, vSize := db1.Size()
+	fmt.Printf("before size lsmSize[%d] vSize[%d]\n", lsmSize, vSize)
+	val := util.RandData(1024)
 	// Insert 100 entries. This will create about 50*3 vlog files and 6 SST files.
 	for i := 0; i < 3; i++ {
 		for j := 0; j < 100; j++ {
@@ -111,6 +115,8 @@ func TestGC(t *testing.T) {
 			require.NoError(t, err)
 		}
 	}
+	lsmSize, vSize = db1.Size()
+	fmt.Printf("after size lsmSize[%d] vSize[%d]\n", lsmSize, vSize)
 	// Run value log GC multiple times. This would ensure at least
 	// one value log file is garbage collected.
 	success := 0
@@ -125,6 +131,7 @@ func TestGC(t *testing.T) {
 	}
 	// Ensure alteast one GC call was successful.
 	fmt.Println("success:", success)
+	_ = db1.Close()
 	//require.NotZero(t, success)
 }
 
@@ -199,8 +206,10 @@ func TestBackup(t *testing.T) {
 	// 3)备份服通过socket直接调用load()
 	// 4)备份服务器负责后台的查询以及定期生成backup文件
 	// 5)原服务器关服前确保同步备份到备份服
+	// TODO: 独立一个日志记录备份版本和对应日期。备份前记录一次，备份后记录一次。供以后查询。
 	lastVersion, err := db.Backup(bakFile, 0)
 
+	db.Size()
 	require.NoError(t, err)
 	require.NoError(t, bakFile.Close())
 	require.NoError(t, db.Close())

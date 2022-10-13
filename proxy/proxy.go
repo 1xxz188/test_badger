@@ -260,23 +260,24 @@ func (proxy *Proxy) RunGC(gcRate float64) {
 	proxy.C.AllAdd(1)
 	defer proxy.C.AllDone()
 
-	originalDirSize, err := util.GetDirSize(proxy.dbDir)
-	if err != nil {
-		panic(err)
-	}
-	log.Printf("Start GC Rate[%0.6f], originalDirSize[%d MB]\n", gcRate, originalDirSize)
-	gcTicker := time.NewTicker(time.Second * 10)
+	lsmSize, originalVSize := proxy.DB.Size()
+	mandatoryGCInterval := time.Minute * 10
+	mandatoryVlogTicker := time.NewTicker(mandatoryGCInterval)
+
+	gcInterval := time.Second * 10
+	threshold := int64(1 << 30) //超过这个大小执行GC
+	vlogTicker := time.NewTicker(gcInterval)
+	lastVlogSize := originalVSize
+
+	log.Printf("Start GC Rate[%0.6f], mandatoryGCInterval[%s], threshold[%d] lsmSize[%d] vSize[%d]\n", gcRate, mandatoryGCInterval.String(), threshold, lsmSize, originalVSize)
 
 	runGC := func() (int64, error) {
 		if proxy.DB.IsClosed() {
 			return 0, errors.New("find db.IsClosed() When GC")
 		}
 		beforeTm := time.Now()
-		beforeSize, err := util.GetDirSize(proxy.dbDir)
-		if err != nil {
-			panic(err)
-		}
 
+		_, beforeSize := proxy.DB.Size()
 		for {
 			if proxy.DB.IsClosed() {
 				return 0, errors.New("find db.IsClosed() When GC")
@@ -291,10 +292,7 @@ func (proxy *Proxy) RunGC(gcRate float64) {
 				proxy.GCInfo.GCRunOKCnt++
 			}
 		}
-		afterSize, err := util.GetDirSize(proxy.dbDir)
-		if err != nil {
-			return 0, err
-		}
+		_, afterSize := proxy.DB.Size()
 		diffGcMB := beforeSize - afterSize
 		diffGcTm := time.Since(beforeTm)
 		if proxy.GCInfo.GCMaxMs < diffGcTm.Milliseconds() {
@@ -306,6 +304,7 @@ func (proxy *Proxy) RunGC(gcRate float64) {
 		if diffGcMB != 0 {
 			log.Printf("GC>[cost %s] size[%d MB]->[%d MB] diff[%d MB]\n", diffGcTm.String(), beforeSize, afterSize, diffGcMB)
 		}
+		lastVlogSize = afterSize
 		return diffGcMB, nil
 	}
 
@@ -316,7 +315,7 @@ func (proxy *Proxy) RunGC(gcRate float64) {
 			if err != nil {
 				panic(err)
 			}
-			fmt.Printf("Close Before DirSize[%d MB] originalDirSize[%d MB] diffMB[%d MB]\n", afterSize, originalDirSize, afterSize-originalDirSize)
+			fmt.Printf("Close Before DirSize[%d MB] originalVSize[%d MB] diffMB[%d MB]\n", afterSize, originalVSize, afterSize-originalVSize)
 			//立即触发一次GC
 			_, err = runGC()
 			if err != nil {
@@ -352,7 +351,16 @@ func (proxy *Proxy) RunGC(gcRate float64) {
 			close(exitGCChan)
 			wgGCExit.Wait() //等待完全GC
 			return
-		case <-gcTicker.C:
+		case <-vlogTicker.C:
+			_, currentVlogSize := proxy.DB.Size()
+			if currentVlogSize < lastVlogSize+threshold {
+				continue
+			}
+			_, err := runGC()
+			if err != nil {
+				log.Println(err)
+			}
+		case <-mandatoryVlogTicker.C:
 			_, err := runGC()
 			if err != nil {
 				log.Println(err)
