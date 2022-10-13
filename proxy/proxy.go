@@ -350,6 +350,8 @@ func (proxy *Proxy) RunGC(gcRate float64) {
 			proxy.C.ConsumerWait() //wait all data save
 			close(exitGCChan)
 			wgGCExit.Wait() //等待完全GC
+			vlogTicker.Stop()
+			mandatoryVlogTicker.Stop()
 			return
 		case <-vlogTicker.C:
 			_, currentVlogSize := proxy.DB.Size()
