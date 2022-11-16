@@ -12,7 +12,7 @@ import (
 	"test_badger/badgerApi"
 	"test_badger/cachedb"
 	"test_badger/controlEXE"
-	"test_badger/customWatchKey"
+	"test_badger/rwwatch"
 	"test_badger/serialize"
 	"test_badger/serialize/json"
 	"test_badger/util"
@@ -31,10 +31,10 @@ type Proxy struct {
 	GCInfo      GcInfo
 	isUseCache  bool //是否使用缓存模式
 	dbDir       string
-	cache       cachedb.Cache               //缓存层
-	watchKeyMgr *customWatchKey.WatchKeyMgr //用于缓存层数据一致性控制
-	noSaveMap   cmap.ConcurrentMap          //待保存列表
-	getKVPool   sync.Pool                   //获取请求对象池
+	cache       cachedb.Cache        //缓存层
+	watchKeyMgr *rwwatch.WatchKeyMgr //用于缓存层数据一致性控制
+	noSaveMap   cmap.ConcurrentMap   //待保存列表
+	getKVPool   sync.Pool            //获取请求对象池
 	serializer  serialize.Serializer
 	flushDbSec  int32 //数据落盘间隔
 	flushDbMxMs int64
@@ -56,7 +56,7 @@ func CreateDBProxy(opt Opts) (*Proxy, error) {
 		return nil, err
 	}
 
-	watchKeyMgr, err := customWatchKey.New(1024)
+	watchKeyMgr, err := rwwatch.New(1024)
 	if err != nil {
 		return nil, err
 	}
@@ -514,7 +514,7 @@ func (proxy *Proxy) getDb(keys []string, result []*badgerApi.KV) []*badgerApi.KV
 }
 
 func (proxy *Proxy) GetsByWatch(watchKey string, keys []string) (result []*badgerApi.KV, version uint32) {
-	_ = proxy.watchKeyMgr.Read(watchKey, func(keyVersion uint32) error {
+	_ = proxy.watchKeyMgr.Read(watchKey, func(keyVersion uint32, isNewKey bool) error {
 		version = keyVersion
 		result = proxy.Gets(keys)
 		return nil

@@ -13,10 +13,10 @@ import (
 	"sync/atomic"
 	"syscall"
 	"test_badger/badgerApi"
-	"test_badger/customWatchKey"
 	"test_badger/logger"
 	"test_badger/proxy"
 	"test_badger/rateLimiter"
+	"test_badger/rwwatch"
 	"test_badger/util"
 	"test_badger/web"
 	"time"
@@ -221,7 +221,7 @@ func work(proxyDB *proxy.Proxy, coroutines int, op string, chId chan int, dataLe
 						}
 						//fmt.Printf("sendId[%d] read id: %d, version: %d\n", sendId, id, version)
 						if err := fnBatchUpdate2(proxyDB, &updateInfo, id, dataLen, version, true); err != nil {
-							if err == customWatchKey.ErrWatchVersionConflicts {
+							if err == rwwatch.ErrWatchVersionConflicts {
 								updateInfo.conflictsCount++
 								retryCount++
 								if retryCount > updateInfo.maxRetryCount { //此次测试应许无限次重试

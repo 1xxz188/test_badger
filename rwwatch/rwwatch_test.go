@@ -1,4 +1,4 @@
-package customWatchKey
+package rwwatch
 
 import (
 	"github.com/stretchr/testify/require"
@@ -26,7 +26,7 @@ func TestReadWrite(t *testing.T) {
 	})
 	require.Equal(t, ErrWatchKeyNotExist, err)
 
-	err = s.Read("key1", func(keyVersion uint32) error {
+	err = s.Read("key1", func(keyVersion uint32, isNewKey bool) error {
 		require.Equal(t, uint32(1), keyVersion)
 		return nil
 	})
@@ -44,11 +44,41 @@ func TestReadWrite(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	err = s.Read("key1", func(keyVersion uint32) error {
+	err = s.Read("key1", func(keyVersion uint32, isNewKey bool) error {
 		require.Equal(t, uint32(3), keyVersion)
 		return nil
 	})
 	require.NoError(t, err)
+}
+
+func TestRemove(t *testing.T) {
+	t.Parallel()
+	s, err := New(5)
+	require.NoError(t, err)
+
+	err = s.Read("key1", func(keyVersion uint32, isNewKey bool) error {
+		require.Equal(t, uint32(1), keyVersion)
+		require.Equal(t, true, isNewKey)
+		return nil
+	})
+
+	err = s.Read("key1", func(keyVersion uint32, isNewKey bool) error {
+		require.Equal(t, uint32(1), keyVersion)
+		require.Equal(t, false, isNewKey)
+		return nil
+	})
+
+	err = s.Remove("key1", 2, true)
+	require.Equal(t, ErrWatchVersionConflicts, err)
+
+	err = s.Remove("key1", 1, true)
+	require.NoError(t, err)
+
+	err = s.Read("key1", func(keyVersion uint32, isNewKey bool) error {
+		require.Equal(t, uint32(1), keyVersion)
+		require.Equal(t, true, isNewKey)
+		return nil
+	})
 }
 
 // TestWatchGetConcurrency Test for SetIfAbsent but not ok
@@ -64,7 +94,7 @@ func TestWatchGetConcurrency(t *testing.T) {
 		go func() {
 			<-beginChan
 			defer wg.Done()
-			err := s.Read("key1", func(keyVersion uint32) error {
+			err := s.Read("key1", func(keyVersion uint32, isNewKey bool) error {
 				require.Equal(t, uint32(1), keyVersion)
 				return nil
 			})
@@ -82,7 +112,7 @@ func TestWatchUpdateConcurrency(t *testing.T) {
 	s, err := New(16)
 	require.NoError(t, err)
 
-	err = s.Read("key1", func(keyVersion uint32) error {
+	err = s.Read("key1", func(keyVersion uint32, isNewKey bool) error {
 		require.Equal(t, uint32(1), keyVersion)
 		return nil
 	})
@@ -115,7 +145,7 @@ func TestWatchUpdateConcurrency(t *testing.T) {
 	wg.Wait()
 
 	t.Log("conflictCnt: ", conflictCnt)
-	err = s.Read("key1", func(keyVersion uint32) error {
+	err = s.Read("key1", func(keyVersion uint32, isNewKey bool) error {
 		require.Equal(t, int32(101), int32(keyVersion))
 		return nil
 	})

@@ -15,7 +15,7 @@ import (
 	"test_badger/badgerApi"
 	"test_badger/cachedb"
 	"test_badger/controlEXE"
-	"test_badger/customWatchKey"
+	"test_badger/rwwatch"
 	"test_badger/util"
 	"testing"
 	"time"
@@ -196,13 +196,13 @@ func TestSave(t *testing.T) {
 						}
 						watchKey := fmt.Sprintf("watchKey_%d", idx)
 						watchVersion := uint32(0)
-						err = proxy.watchKeyMgr.Read(watchKey, func(keyVersion uint32) error {
+						err = proxy.watchKeyMgr.Read(watchKey, func(keyVersion uint32, isNewKey bool) error {
 							watchVersion = keyVersion
 							return nil
 						})
 						require.NoError(t, err)
 						err = proxy.SetsByWatch(watchKey, watchVersion, kvs)
-						if err != nil && err != customWatchKey.ErrWatchVersionConflicts {
+						if err != nil && err != rwwatch.ErrWatchVersionConflicts {
 							t.Error(err)
 							return
 						}

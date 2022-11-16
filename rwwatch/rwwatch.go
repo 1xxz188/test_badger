@@ -1,4 +1,4 @@
-package customWatchKey
+package rwwatch
 
 import (
 	"errors"
@@ -52,7 +52,8 @@ func New(shardCount uint32) (*WatchKeyMgr, error) {
 	return s, nil
 }
 
-func (s *WatchKeyMgr) Read(key string, fn func(keyVersion uint32) error) (err error) {
+// Read will add key if not exist the key
+func (s *WatchKeyMgr) Read(key string, fn func(keyVersion uint32, isNewKey bool) error) (err error) {
 	shard := s.getShard(key)
 	shard.lock.RLock()
 	// Get item from shard.
@@ -62,7 +63,7 @@ func (s *WatchKeyMgr) Read(key string, fn func(keyVersion uint32) error) (err er
 		shard.lock.RUnlock()
 		val.lock.RLock()
 		defer val.lock.RUnlock() //prevent panic
-		err = fn(val.version)
+		err = fn(val.version, false)
 	} else {
 		shard.lock.RUnlock()
 		shard.lock.Lock()
@@ -76,11 +77,12 @@ func (s *WatchKeyMgr) Read(key string, fn func(keyVersion uint32) error) (err er
 		shard.lock.Unlock()
 		val.lock.RLock()
 		defer val.lock.RUnlock()
-		err = fn(val.version)
+		err = fn(val.version, true)
 	}
 	return err
 }
 
+//Write fail if not exist the key
 func (s *WatchKeyMgr) Write(key string, keyVersion uint32, isCheckKeyVersion bool, fn func(keyVersion uint32) error) error {
 	shard := s.getShard(key)
 	shard.lock.RLock()
@@ -99,6 +101,32 @@ func (s *WatchKeyMgr) Write(key string, keyVersion uint32, isCheckKeyVersion boo
 	err := fn(val.version)
 	val.version += 1
 	return err
+}
+
+func (s *WatchKeyMgr) Remove(key string, keyVersion uint32, isCheckKeyVersion bool) error {
+	shard := s.getShard(key)
+	shard.lock.RLock()
+	val, ok := shard.items[key]
+	if !ok {
+		shard.lock.RUnlock()
+		return ErrWatchKeyNotExist
+	}
+	if isCheckKeyVersion && keyVersion != val.version {
+		shard.lock.RUnlock()
+		return ErrWatchVersionConflicts
+	}
+	shard.lock.RUnlock()
+	shard.lock.Lock()
+	defer shard.lock.Unlock()
+	val, ok = shard.items[key]
+	if !ok {
+		return ErrWatchKeyNotExist
+	}
+	if isCheckKeyVersion && keyVersion != val.version {
+		return ErrWatchVersionConflicts
+	}
+	delete(shard.items, key) //移除key
+	return nil
 }
 
 func fnv32(key string) uint32 {
