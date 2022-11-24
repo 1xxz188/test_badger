@@ -6,6 +6,7 @@ import (
 	"github.com/dgraph-io/badger/v3"
 	cmap "github.com/orcaman/concurrent-map"
 	"github.com/valyala/bytebufferpool"
+	"golang.org/x/sys/cpu"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -17,6 +18,11 @@ import (
 	"test_badger/serialize/json"
 	"test_badger/util"
 	"time"
+	"unsafe"
+)
+
+const (
+	cacheLineSize = unsafe.Sizeof(cpu.CacheLinePad{})
 )
 
 type GcInfo struct {
@@ -39,15 +45,17 @@ type Proxy struct {
 	flushDbSec  int32 //数据落盘间隔
 	flushDbMxMs int64
 
-	cachePenetrateCnt uint64   //缓存穿透次数
-	_                 [56]byte //cpu
-	cacheCnt          uint64   //缓存命中次数
-	_                 [56]byte //cpu
-	rmButNotDelCnt    uint64   //淘汰内存次数(非正常过期，有值则表示数据落地的协程cpu瓶颈)
-	_                 [56]byte //cpu
-	timerSaveCnt      uint64   //定期协程保存key数
-	_                 [56]byte //cpu
-	RmButNotFind      uint64   //满缓存回调未找到key的次数
+	_                 [cacheLineSize]byte
+	cachePenetrateCnt uint64                                           //缓存穿透次数
+	_                 [cacheLineSize - unsafe.Sizeof(new(uint64))]byte //cpu
+	cacheCnt          uint64                                           //缓存命中次数
+	_                 [cacheLineSize - unsafe.Sizeof(new(uint64))]byte //cpu
+	rmButNotDelCnt    uint64                                           //淘汰内存次数(非正常过期，有值则表示数据落地的协程cpu瓶颈)
+	_                 [cacheLineSize - unsafe.Sizeof(new(uint64))]byte //cpu
+	timerSaveCnt      uint64                                           //定期协程保存key数
+	_                 [cacheLineSize - unsafe.Sizeof(new(uint64))]byte //cpu
+	RmButNotFind      uint64                                           //满缓存回调未找到key的次数
+	_                 [cacheLineSize - unsafe.Sizeof(new(uint64))]byte //cpu
 }
 
 func CreateDBProxy(opt Opts) (*Proxy, error) {
